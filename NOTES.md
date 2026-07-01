@@ -3,11 +3,11 @@
 ## To Do
 
 ### Current Sprint
-- [ ] Get a 5V/3A USB-C power supply for Pi desk development
-- [ ] Flash Pi with Ubuntu 24.04 Server (64-bit) via Raspberry Pi Imager
-- [ ] Install ROS2 Jazzy on Pi
-- [ ] Verify SSH access from Mac (`ssh ubuntu@followme-pi.local`)
-- [ ] Connect ESP32 to Pi via USB serial and verify communication
+- [x] Get a 5V/3A USB-C power supply for Pi desk development
+- [x] Flash Pi with Ubuntu 24.04 Server (64-bit) via Raspberry Pi Imager
+- [x] Install ROS2 Jazzy on Pi (verified with `ros2 topic list`)
+- [x] Verify SSH access from Mac (`ssh ubuntu@followme-pi.local`)
+- [ ] Connect ESP32 to Pi via USB serial and verify communication (hold until DW3000 HAL protocol settles)
 
 ### Up Next
 - [ ] Install DW3000 AoA UWB (rewrite uwb.cpp + simplify fusion.cpp on main or ros2-hal)
@@ -20,13 +20,17 @@
 ## Hardware Updates (Planned)
 
 ### DW3000 AoA UWB — replaces 3x RYUW122
-- 2x Makerfabs ESP32-UWB-DW3000 (dual antenna, supports PDoA/AoA)
-- One board on car as UWB co-processor: runs initiator + AoA firmware, outputs dist + bearing over UART to main ESP32-S3
-- One board as tag: carried by person or mounted on Car 2 (responder firmware)
-- Main ESP32-S3 aggregates UWB data into existing JSON serial frame to Pi — single serial connection preserved
+- Hardware: Makerfabs [MaUWB STM32 AOA Development Kit](https://www.makerfabs.com/mauwb-stm32-aoa-development-kit.html) — anchor + tag pair, STM32F103C8T6 + Qorvo DW3000, dual antenna
+- Correction: this is STM32-based, not ESP32-based as originally assumed. No onboard ESP32 co-processor.
+- Controlled via AT commands over UART1 (same pattern as existing RYUW122s) — confirmed via firmware repo `Makerfabs/UWB-AOA-with-Display-STM32F103C8T6`
+- Spec (from that repo's README): angle ±60°, angle error ±5°, ranging error <10cm, positioning error <10cm, coverage radius 30m@6.8Mbps
+- Note: the generic `Makerfabs/MaUWB_ESP32S3-with-STM32-AT-Command` repo (range-only, no angle field in `AT+RANGE`) is a DIFFERENT product line — don't confuse the two when looking up firmware/docs
+- One board on car as anchor, one as tag (carried by person or mounted on Car 2)
+- Main ESP32-S3 reads anchor's UART output, aggregates into existing JSON serial frame to Pi — single serial connection preserved
 - Serial protocol changes: `uwb_l/uwb_r/uwb_f` → `uwb_dist` + `uwb_bearing`
 - Eliminates all 3-anchor cycling logic in uwb.cpp and most of the trilateration in fusion.cpp
-- Firmware library TBD: check Makerfabs example sketches first
+- Firmware ships factory-flashed; ST-Link only needed if updating module firmware (repo has default `Project_Anchor_v1.0.hex` / `Project_Tag_v1.0.hex`)
+- Plan: install on `main` first to validate hardware before folding into `ros2-hal`
 
 ### Magnetic encoder — replaces hall effect RPM sensor
 - Module TBD (likely AS5600 or AS5048)
@@ -76,5 +80,4 @@
 - What connector does the LiPo use? (needed to order battery splitter)
 - Should the Pi host its own WiFi AP (like the ESP32 does) or connect to home network? Tradeoff: AP mode works anywhere, home network mode gives internet access on the Pi.
 - ros2_control controller vs standalone node for PID — worth deciding before Phase 7
-- DW3000 firmware library: Makerfabs examples, Qorvo DW3_QM33_SDK, or community Arduino library?
-- Which branch to install DW3000 on: main (validate hardware, simplify existing firmware) vs ros2-hal (fold into HAL transition)?
+- Exact AT command set for the AOA anchor's angle report (need to check `Makerfabs/UWB-AOA-with-Display-STM32F103C8T6` repo's AT command docs/firmware source directly — haven't confirmed the report line format yet, e.g. whether it extends `AT+RANGE` or uses a separate command)
