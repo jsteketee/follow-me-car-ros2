@@ -7,10 +7,11 @@
 - [x] Flash Pi with Ubuntu 24.04 Server (64-bit) via Raspberry Pi Imager
 - [x] Install ROS2 Jazzy on Pi (verified with `ros2 topic list`)
 - [x] Verify SSH access from Mac (`ssh ubuntu@followme-pi.local`)
+- [x] Validate DW3000 anchor/tag hardware end-to-end (discovery, pairing, both JSON and binary ranging output) — see DW3000 section below
+- [ ] Rewrite `uwb.cpp`/`fusion.cpp` on `follow-me-car-esp32` to consume the DW3000 protocol instead of RYUW122 trilateration
 - [ ] Connect ESP32 to Pi via USB serial and verify communication (hold until DW3000 HAL protocol settles)
 
 ### Up Next
-- [ ] Install DW3000 AoA UWB (rewrite uwb.cpp + simplify fusion.cpp on main or ros2-hal)
 - [ ] Install magnetic encoder in place of hall effect RPM sensor
 - [ ] ESP32 HAL firmware (Phase 2) — strip fusion/nav/control, add serial_hal.cpp
 - [ ] ROS2 bridge node (Phase 3)
@@ -22,7 +23,7 @@
 ### DW3000 AoA UWB — replaces 3x RYUW122
 - Hardware: Makerfabs [MaUWB STM32 AOA Development Kit](https://www.makerfabs.com/mauwb-stm32-aoa-development-kit.html) — anchor + tag pair, STM32F103C8T6 + Qorvo DW3000, dual antenna
 - Correction: this is STM32-based, not ESP32-based as originally assumed. No onboard ESP32 co-processor.
-- Controlled via AT commands over UART1 (same pattern as existing RYUW122s) — confirmed via firmware repo `Makerfabs/UWB-AOA-with-Display-STM32F103C8T6`
+- Controlled over UART1, same physical pattern as the RYUW122s, but a different command syntax — bare `CMDNAME arg1 arg2...` (not `AT+CMD=`) — confirmed via firmware repo `Makerfabs/UWB-AOA-with-Display-STM32F103C8T6`
 - Spec (from that repo's README): angle ±60°, angle error ±5°, ranging error <10cm, positioning error <10cm, coverage radius 30m@6.8Mbps
 - Note: the generic `Makerfabs/MaUWB_ESP32S3-with-STM32-AT-Command` repo (range-only, no angle field in `AT+RANGE`) is a DIFFERENT product line — don't confuse the two when looking up firmware/docs
 - One board on car as anchor, one as tag (carried by person or mounted on Car 2)
@@ -31,6 +32,18 @@
 - Eliminates all 3-anchor cycling logic in uwb.cpp and most of the trilateration in fusion.cpp
 - Firmware ships factory-flashed; ST-Link only needed if updating module firmware (repo has default `Project_Anchor_v1.0.hex` / `Project_Tag_v1.0.hex`)
 - Plan: install on `main` first to validate hardware before folding into `ros2-hal`
+
+**Hardware validated end-to-end (bench test, 2026-07-02).** Anchor talks over UART1 (`TXD1`/`RXD1` header pins, 115200 baud) — not native USB CDC. Two report modes:
+- Default JSON: `"JS"` + 4 hex-digit length + JSON payload, e.g. `{"TWR":{"a16":"E1AE","D":50,"Xcm":19,"Ycm":48,...}}` — bearing = `atan2(Xcm, Ycm)`.
+- Binary "carfollow" mode (`USER_CMD 1` + `save`): fixed 31-byte frame, `0x2A` header, length byte, payload (`sn`, `addr16`, `angle` int32, `distance` int32 cm, plus power/accel fields), XOR checksum, `0x23` footer. Pre-computed `angle`/`distance` as plain ints — no parsing math needed on the ESP32 side.
+
+**Pairing required before ranging starts** (once per tag, persists across power cycles): anchor auto-discovers the tag over UWB and emits an unsolicited `"NewTag":"<64-bit hex id>"` JSON message; host must reply `addtag <id64> <addr16> 0001 64 00` then `save` to bind it into the anchor's known-tag list (`fastrate=1`=10Hz, `useIMU=0` — matches Makerfabs' own Windows GUI defaults).
+
+**Gotcha hit during validation:** `addtag` initially failed with `error function` (handler returned NULL) even though the known-tag list wasn't full (1/9 slots used) — root cause never fully pinned down in source, but a factory reset (`RTOKEN` command) cleared whatever stale/corrupted flash state was blocking it. If `addtag` fails on a fresh board, try `RTOKEN` first.
+
+Bench test firmware lives in `follow-me-car-esp32` on `main` (does not touch the real car firmware — isolated via `build_src_filter` + separate `lib_deps`):
+- `src/dw3000_test.cpp` / `pio run -e dw3000-test` — automated: switches anchor to binary mode, auto-pairs on `NewTag`, logs parsed frames.
+- `src/dw3000_bridge.cpp` / `pio run -e dw3000-bridge` — transparent UART passthrough for manual command/response testing (typed into `pio device monitor`, or driven directly via a pyserial script for fast iteration without rebuilding).
 
 ### Magnetic encoder — replaces hall effect RPM sensor
 - Module TBD (likely AS5600 or AS5048)
@@ -80,4 +93,4 @@
 - What connector does the LiPo use? (needed to order battery splitter)
 - Should the Pi host its own WiFi AP (like the ESP32 does) or connect to home network? Tradeoff: AP mode works anywhere, home network mode gives internet access on the Pi.
 - ros2_control controller vs standalone node for PID — worth deciding before Phase 7
-- Exact AT command set for the AOA anchor's angle report (need to check `Makerfabs/UWB-AOA-with-Display-STM32F103C8T6` repo's AT command docs/firmware source directly — haven't confirmed the report line format yet, e.g. whether it extends `AT+RANGE` or uses a separate command)
+- How to preserve the RYUW122 3-anchor trilateration code once `uwb.cpp`/`fusion.cpp` are rewritten for DW3000 — discussed tag + branch + `#ifdef`/build-env approach early on but never implemented; needs a decision before starting the rewrite (see chat 2026-07-02)
