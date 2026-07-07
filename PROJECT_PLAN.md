@@ -96,20 +96,19 @@ Banked by end of Day 1: packages, colcon, nodes, custom msgs, TF2, odometry, vis
 
 ## Hardware
 
-| Item | Role | Status |
+Main components only — power distribution and wiring tracked separately (see
+"Critical-path risks" for the open power items).
+
+| Component | Role | Status |
 |---|---|---|
 | Raspberry Pi 4B 4GB | runs all ROS2 nodes | ✅ Ubuntu 24.04 + ROS2 Jazzy, SSH verified |
-| 5V/3A USB-C wall supply | Pi desk development | ✅ |
 | ESP32-S3 | HAL firmware (`ros2-hal` branch) | ✅ on car |
-| USB-C → USB-A cable | Pi ↔ ESP32 serial | ⚠️ confirm on hand |
-| Makerfabs MaUWB AOA kit (DW3000) | distance + bearing to tag | ✅ installed & validated; ⚠️ unstable on car 3.3V rail — needs dedicated 5V into anchor USB-C |
-| Hall-effect sensor | RPM / speed (staying — not replaced) | ✅ |
+| Makerfabs MaUWB AOA kit (DW3000) | distance + bearing to tag | ✅ installed & validated |
+| Hall-effect sensor | RPM / speed | ✅ |
 | AS5600 encoder (I2C) | cogging detection | ✅ installed & validated |
 | BNO085 IMU (I2C) | yaw for dead reckoning + fusion | ✅ |
 | OV2640 on XIAO ESP32-S3 (I2C) | blob camera (optional, deferred) | ⚠️ confirm status |
 | SSD1306 OLED | on-car display | ✅ |
-| Pololu D24V50F5 (5V/5A) | on-car Pi power from 2S LiPo | ⚠️ confirm arrived; fallback: USB power bank |
-| LiPo battery splitter | feeds ESC + Pi regulator | ⚠️ blocked on connector type (XT60 vs T-Deans — never confirmed) |
 | Open-frame RC chassis + 2S LiPo | vehicle | ✅ |
 
 ## ROS2 Skills Showcased
