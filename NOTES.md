@@ -8,13 +8,12 @@
 - [x] Install ROS2 Jazzy on Pi (verified with `ros2 topic list`)
 - [x] Verify SSH access from Mac (`ssh ubuntu@followme-pi.local`)
 - [x] Validate DW3000 anchor/tag hardware end-to-end (discovery, pairing, both JSON and binary ranging output) — see DW3000 section below
-- [ ] Rewrite `uwb.cpp`/`fusion.cpp` on `follow-me-car-esp32` to consume the DW3000 protocol instead of RYUW122 trilateration
-- [ ] Connect ESP32 to Pi via USB serial and verify communication (hold until DW3000 HAL protocol settles)
-
-### Up Next
-- [ ] Install magnetic encoder in place of hall effect RPM sensor
-- [ ] ESP32 HAL firmware (Phase 2) — strip fusion/nav/control, add serial_hal.cpp
-- [ ] ROS2 bridge node (Phase 3)
+- [x] Rewrite `uwb.cpp`/`fusion.cpp` on `follow-me-car-esp32` to consume the DW3000 protocol instead of RYUW122 trilateration (committed on main; old trilateration preserved via tag `v2.0-three-anchor-uwb`)
+- [x] Integrate AS5600 magnetic encoder — role settled as cogging detection; hall-effect sensor stays for RPM/speed
+- [x] Fast-forward `ros2-hal` branch to validated main (2495c85) and push to GitHub — HAL work starts from here
+- [ ] **Interview sprint Day 1**: serial_hal telemetry stream (strip nothing) → bridge node + custom msgs → dead-reckoning pose estimator + TF2 → Foxglove/rosbag (see PROJECT_PLAN.md "Interview Critical Path")
+- [ ] **Interview sprint Day 2**: setpoint cmd path + failsafe on ESP32 → NavigateToPose action server → Goal Pose click demo
+- [ ] Hardware pre-flight: on-car Pi power (Pololu or power bank), USB A→C cable, anchor 5V fix (optional for demo)
 
 ---
 

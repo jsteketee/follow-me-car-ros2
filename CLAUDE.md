@@ -16,15 +16,23 @@ Companion ESP32 firmware: `follow-me-car-esp32` repo, `ros2-hal` branch.
 
 ## Serial Protocol (ESP32 ↔ Pi)
 
-**Incoming from ESP32 (~20 Hz, newline-delimited JSON):**
+**Incoming from ESP32 (50 Hz target, newline-delimited JSON):**
 ```json
-{"uwb_l":183.2,"uwb_r":187.4,"uwb_f":42.1,"yaw":23.4,"pitch":0.1,"roll":-0.3,"speed":1.82,"odo":4821.3,"cam_found":1,"cam_x":0.23,"cam_y":0.11}
+{"uwb_dist":183.2,"uwb_bearing":-12.4,"yaw":23.4,"pitch":0.1,"roll":-0.3,"speed":1.82,"odo":4821.3,"enc_speed":1.79,"cam_found":1,"cam_x":0.23,"cam_y":0.11}
 ```
+`uwb_dist` (cm) + `uwb_bearing` (deg) come directly from the DW3000 AoA anchor. `speed`/`odo`
+are hall-effect derived; `enc_speed` is the AS5600 encoder (for Pi-side cogging detection —
+exact encoder field set is pending that decision). Frames carry the ESP32 timestamp so the
+Pi computes dt from device time, not arrival time.
 
 **Outgoing to ESP32 (on demand, newline-delimited JSON):**
 ```json
-{"throttle":0.31,"steering":-0.18}
+{"target_speed":1.8,"target_angle":-12.4}
 ```
+Setpoints feed the ESP32's existing tuned PID loops (decided 2026-07-04 — see PROJECT_PLAN.md
+"Control Loop Placement"). The protocol reserves a raw-actuator mode
+(`{"throttle":0.31,"steering":-0.18}`) for the post-interview migration of the loops to the Pi.
+ESP32 applies a cmd-timeout failsafe: neutral throttle if no command arrives within the timeout.
 
 ## Package Structure
 
