@@ -26,6 +26,28 @@
 
 ESP32 repo: `follow-me-car-esp32`, branch `ros2-hal`.
 
+## Serial Protocol (ESP32 ↔ Pi)
+
+**Incoming from ESP32 (50 Hz target, newline-delimited JSON):**
+```json
+{"ts":12345,"uwb_dist":183.2,"uwb_bearing":-12.4,"yaw":23.4,"pitch":0.1,"roll":-0.3,"speed":1.82,"odo":4821.3,"enc_speed":1.79,"cogging":0,"cam_found":1,"cam_x":0.23,"cam_y":0.11,"fused_angle":5.2,"fused_dist":185.0,"fused_unc":17.3}
+```
+`ts` (ms) is the ESP32 device timestamp — Pi computes dt from device time, not arrival time.
+`uwb_dist` (cm) + `uwb_bearing` (deg) are Kalman-filtered DW3000 AoA readings; -1 if no fix.
+`speed`/`odo` are hall-effect derived. `enc_speed` is AS5600 encoder EMA velocity (mph, forward
+positive) for Pi-side cogging detection; `cogging` is the ESP32 latching cogging flag (0/1).
+`fused_angle`/`fused_dist`/`fused_unc` are the ESP32's Kalman-fused bearing, distance, and
+bearing variance — streamed because Pi-side fusion is deferred post-interview.
+
+**Outgoing to ESP32 (on demand, newline-delimited JSON):**
+```json
+{"target_speed":1.8,"target_angle":-12.4}
+```
+Setpoints feed the ESP32's existing tuned PID loops (see "Control Loop Placement" below). The
+protocol reserves a raw-actuator mode (`{"throttle":0.31,"steering":-0.18}`) for the
+post-interview migration of the loops to the Pi. ESP32 applies a cmd-timeout failsafe: neutral
+throttle if no command arrives within the timeout.
+
 ## Control Loop Placement — DECIDED (2026-07-04): setpoints first, migrate later
 
 **Before the interview:** both PID loops (speed + steering) stay on the ESP32, already tuned
@@ -178,3 +200,44 @@ Main components only — power distribution and wiring not tracked here.
 - Foxglove/RViz config: heading arrow, path trace, sensor status markers
 - Single launch file starts everything
 - rosbag2 recording in launch file
+
+## Repository Reference
+
+### Package structure
+```
+src/
+├── follow_me_interfaces/     — custom message + action definitions
+├── follow_me_hardware/       — ros2_control hardware interface (C++ plugin)
+├── follow_me_nodes/          — Python nodes: fusion, dead reckoning, nav, visualization
+└── follow_me_bringup/        — launch files + YAML parameter configs
+```
+
+### Build & run
+```bash
+# Build
+cd ~/follow-me-car-ros2
+colcon build --symlink-install
+
+# Source
+source install/setup.bash
+
+# Launch everything
+ros2 launch follow_me_bringup follow_me.launch.py
+```
+
+### Key topics
+| Topic | Type | Direction |
+|-------|------|-----------|
+| `/uwb/reading` | `follow_me_interfaces/UWBReading` | ESP32 → ROS2 |
+| `/imu/data` | `sensor_msgs/Imu` | ESP32 → ROS2 |
+| `/camera/blob` | `follow_me_interfaces/CameraBlob` | ESP32 → ROS2 |
+| `/follow_me/pose` | `follow_me_interfaces/FusedPose` | fusion node output |
+| `/odometry` | `nav_msgs/Odometry` | dead reckoning node output |
+| `/cmd_vel` | `geometry_msgs/Twist` | controller → hardware interface |
+
+### Actions
+| Action | Type | Description |
+|--------|------|-------------|
+| `/follow_me` | `follow_me_interfaces/FollowMe` | Start/stop autonomous following |
+| `/navigate_to_pose` | `nav2_msgs/NavigateToPose` | Dead reckoning single goal |
+| `/follow_waypoints` | `nav2_msgs/FollowWaypoints` | Dead reckoning waypoint mission |
