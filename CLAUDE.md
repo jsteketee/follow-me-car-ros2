@@ -18,12 +18,14 @@ Companion ESP32 firmware: `follow-me-car-esp32` repo, `ros2-hal` branch.
 
 **Incoming from ESP32 (50 Hz target, newline-delimited JSON):**
 ```json
-{"uwb_dist":183.2,"uwb_bearing":-12.4,"yaw":23.4,"pitch":0.1,"roll":-0.3,"speed":1.82,"odo":4821.3,"enc_speed":1.79,"cam_found":1,"cam_x":0.23,"cam_y":0.11}
+{"ts":12345,"uwb_dist":183.2,"uwb_bearing":-12.4,"yaw":23.4,"pitch":0.1,"roll":-0.3,"speed":1.82,"odo":4821.3,"enc_speed":1.79,"cogging":0,"cam_found":1,"cam_x":0.23,"cam_y":0.11,"fused_angle":5.2,"fused_dist":185.0,"fused_unc":17.3}
 ```
-`uwb_dist` (cm) + `uwb_bearing` (deg) come directly from the DW3000 AoA anchor. `speed`/`odo`
-are hall-effect derived; `enc_speed` is the AS5600 encoder (for Pi-side cogging detection —
-exact encoder field set is pending that decision). Frames carry the ESP32 timestamp so the
-Pi computes dt from device time, not arrival time.
+`ts` (ms) is the ESP32 device timestamp — Pi computes dt from device time, not arrival time.
+`uwb_dist` (cm) + `uwb_bearing` (deg) are Kalman-filtered DW3000 AoA readings; -1 if no fix.
+`speed`/`odo` are hall-effect derived. `enc_speed` is AS5600 encoder EMA velocity (mph, forward
+positive) for Pi-side cogging detection; `cogging` is the ESP32 latching cogging flag (0/1).
+`fused_angle`/`fused_dist`/`fused_unc` are the ESP32's Kalman-fused bearing, distance, and
+bearing variance — streamed because Pi-side fusion is deferred post-interview.
 
 **Outgoing to ESP32 (on demand, newline-delimited JSON):**
 ```json

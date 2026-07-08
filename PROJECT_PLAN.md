@@ -87,17 +87,10 @@ Banked by end of Day 1: packages, colcon, nodes, custom msgs, TF2, odometry, vis
   there. Recommended: Foxglove Studio on the Mac connected to `foxglove_bridge` on the Pi
   (native Mac app, no Mac ROS2 install, supports click-to-publish goal poses). Decide first
   thing Day 1.
-- **On-car Pi power**: the untethered driving demo needs the Pi powered from the car (Pololu
-  regulator, or a USB power bank strapped to the chassis as the zero-solder fallback).
-  Verify before Day 2 afternoon.
-- **DW3000 anchor power**: known instability on the car's 3.3V rail — fix is dedicated 5V
-  into the anchor's own USB-C (its onboard regulator + caps). Note: waypoint nav needs only
-  IMU + odometry, not UWB, so this does not block the Day 2 demo — fix opportunistically.
 
 ## Hardware
 
-Main components only — power distribution and wiring tracked separately (see
-"Critical-path risks" for the open power items).
+Main components only — power distribution and wiring not tracked here.
 
 | Component | Role | Status |
 |---|---|---|

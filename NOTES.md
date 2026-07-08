@@ -13,7 +13,6 @@
 - [x] Fast-forward `ros2-hal` branch to validated main (2495c85) and push to GitHub — HAL work starts from here
 - [ ] **Interview sprint Day 1**: serial_hal telemetry stream (strip nothing) → bridge node + custom msgs → dead-reckoning pose estimator + TF2 → Foxglove/rosbag (see PROJECT_PLAN.md "Interview Critical Path")
 - [ ] **Interview sprint Day 2**: setpoint cmd path + failsafe on ESP32 → NavigateToPose action server → Goal Pose click demo
-- [ ] Hardware pre-flight: on-car Pi power (Pololu or power bank), USB A→C cable, anchor 5V fix (optional for demo)
 
 ---
 
@@ -40,6 +39,15 @@
 
 **Gotcha hit during validation:** `addtag` initially failed with `error function` (handler returned NULL) even though the known-tag list wasn't full (1/9 slots used) — root cause never fully pinned down in source, but a factory reset (`RTOKEN` command) cleared whatever stale/corrupted flash state was blocking it. If `addtag` fails on a fresh board, try `RTOKEN` first.
 
+**Known limitation — AoA field of view (recorded 2026-07-04):** bearing is only reliable
+within roughly ±60°; past ~90° the anchor cannot distinguish front from back (a single
+dual-antenna pair has inherent front/back ambiguity — the same problem the old third RYUW122
+anchor existed to resolve). Bench signature: with the tag outside the cone, reported angle
+pins at exactly ±90 with no sample-to-sample jitter — a detectable clamp, not a plausible
+measurement. Implication: a tag behind the car produces confidently wrong bearings; naive
+bearing-following can steer on a false assumption. Mitigation direction: see "Follow-me as
+waypoint planning with recovery" in brainstorming below.
+
 Bench test firmware lives in `follow-me-car-esp32` on `main` (does not touch the real car firmware — isolated via `build_src_filter` + separate `lib_deps`):
 - `src/dw3000_test.cpp` / `pio run -e dw3000-test` — automated: switches anchor to binary mode, auto-pairs on `NewTag`, logs parsed frames.
 - `src/dw3000_bridge.cpp` / `pio run -e dw3000-bridge` — transparent UART passthrough for manual command/response testing (typed into `pio device monitor`, or driven directly via a pyserial script for fast iteration without rebuilding).
@@ -61,9 +69,14 @@ Bench test firmware lives in `follow-me-car-esp32` on `main` (does not touch the
 ### Mode 2 — Single car, camera-based person following
 - Primary sensor: camera with person detection algorithm (no wearable required)
 - Servo-actuated camera pan to keep person in frame
-- Hardware options:
+- Camera decision (2026-07-04): **add a camera attached directly to the Pi** rather than
+  streaming from the existing XIAO/OV2640 — its I2C link can't carry pixels, and WiFi/USB
+  streaming firmware is hassle for a worse result. The mounted XIAO stays as-is (optional
+  blob sensor only)
+- Hardware options (all Pi-direct):
+  - **USB webcam** (~$15): 30 fps over V4L2, standard `usb_cam` ROS2 node, zero custom firmware — cheapest entry
+  - **Pi Camera Module 3** (CSI): better quality/latency than USB, Pi does all inference (YOLOv8n ~10-15 fps at reduced resolution)
   - **OAK-D Lite** (~$150): onboard Myriad X neural inference chip, offloads detection from Pi, also provides stereo depth (replaces UWB distance)
-  - **Pi Camera Module 3 + Pi inference**: YOLOv8n at reduced resolution (~10-15 fps), cheaper but Pi does all compute
 - Servo pan channel: additional PWM output from ESP32 HAL
 
 ### Mode 3 — Two-car formation
@@ -83,6 +96,40 @@ Bench test firmware lives in `follow-me-car-esp32` on `main` (does not touch the
 - OAK-D Lite — enables camera-based person detection (Mode 2) + stereo depth
 
 ### Future software ideas
+- **Follow-me as waypoint planning with recovery (2026-07-04)** — response to the AoA ±60°
+  FOV limitation above. Instead of steering directly on the instantaneous UWB bearing,
+  convert confident tag fixes into waypoints in the `odom` frame and follow those. Anomalous
+  UWB readings (angle clamped at ±90, bearing jump inconsistent with dead-reckoned motion,
+  fusion uncertainty spike) then trigger a *recovery plan* rather than steering on a false
+  tag location. Fits naturally once `NavigateToPose` exists: follow-me becomes continuous
+  goal-updating on the same nav machinery as waypoint missions, unifying Mode 1 with the
+  commanded-nav system.
+
+  Sketched recovery behavior (2026-07-04):
+  1. When bearing approaches/exits the reliable cone (|bearing| past ~60°), store the last
+     confident tag location.
+  2. Set a recovery goal that turns the robot until its compass heading faces that stored
+     location.
+  3. On goal completion, UWB bearing is considered trustworthy again and normal following
+     resumes.
+
+  Engineering notes on the sketch:
+  - **Store the tag location in the `odom` frame** (dead-reckoned pose + bearing + distance
+    → absolute position), not as a relative bearing — a relative value goes stale the moment
+    the robot moves/turns. "Face the tag" then = atan2 in odom vs. compass yaw.
+  - **Ackermann can't rotate in place** — the "rotate to face" step is really a steering
+    maneuver (arc forward, or K-turn if reverse is available). Simplest version that subsumes
+    it: set the recovery goal to *drive toward* the stored tag location; heading converges
+    onto it en route and the bearing swings back into the cone naturally.
+  - **Distance stays valid during bearing clamp** — ToF ranging doesn't depend on PDoA
+    (bench-confirmed: dist read a sane 27-39cm while angle was pinned at 90). Range is usable
+    as a consistency check during recovery.
+  - **Re-acquisition should require more than goal completion**: N consecutive readings with
+    |bearing| < 60°, sample-to-sample jitter present (a live reading jitters; a clamp doesn't),
+    and distance consistent with the stored location.
+  - Two trigger tiers: proactive (|bearing| climbing past ~50-55° while still valid → re-aim
+    early with a trustworthy fix) and reactive (clamp/jump signature → fall back to stored
+    location).
 - Web UI on Pi for sending waypoint missions from a phone
 - Record and replay a driven path as a waypoint mission
 - Multi-tag support — follow one of several tagged people
