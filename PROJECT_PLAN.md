@@ -33,7 +33,18 @@ ESP32 repo: `follow-me-car-esp32`, branch `ros2-hal`.
 {"ts":12345,"uwb_dist":183.2,"uwb_bearing":-12.4,"yaw":23.4,"pitch":0.1,"roll":-0.3,"speed":1.82,"odo":4821.3,"enc_speed":1.79,"cogging":0,"cam_found":1,"cam_x":0.23,"cam_y":0.11,"fused_angle":5.2,"fused_dist":185.0,"fused_unc":17.3}
 ```
 `ts` (ms) is the ESP32 device timestamp — Pi computes dt from device time, not arrival time.
+The bridge maps `ts` into the ROS clock via a constant offset captured on the first frame
+(re-captured if `ts` jumps backwards, i.e. ESP32 reboot). Raw device uptime in a header would
+stamp messages in 1970 and tf2 would silently drop the transforms; the offset cancels under
+subtraction, so downstream dt is still exact device time.
 `uwb_dist` (cm) + `uwb_bearing` (deg) are Kalman-filtered DW3000 AoA readings; -1 if no fix.
+
+`odo` is the accumulated odometer in **cm** (verified on hardware 2026-07-09).
+
+**Units:** the ESP32 speaks mph / cm / degrees. The bridge node is the boundary and converts
+everything to SI (REP-103: metres, m/s, radians) before publishing, so every ROS2 topic
+downstream is SI by construction and needs no scale factors. Note `fused_unc` is a *variance*
+(deg²), so it converts by the **square** of the degree→radian factor.
 `speed`/`odo` are hall-effect derived. `enc_speed` is AS5600 encoder EMA velocity (mph, forward
 positive) for Pi-side cogging detection; `cogging` is the ESP32 latching cogging flag (0/1).
 `fused_angle`/`fused_dist`/`fused_unc` are the ESP32's Kalman-fused bearing, distance, and
@@ -82,7 +93,7 @@ step, zero control retuning.
 1. ESP32 (`ros2-hal`): add `serial_hal.cpp` telemetry stream (50 Hz JSON over USB serial).
    **Strip nothing** — standalone modes keep working.
 2. Pi: `follow_me_interfaces` custom messages + Python bridge node publishing
-   `/uwb/reading`, `/imu/data`, RPM/odometry topics.
+   `/imu/data`, `/tag/pose`, `/wheel/speed`, `/wheel/distance`.
 3. Dead-reckoning pose estimator node → `nav_msgs/Odometry` + TF2 `odom → base_link`.
 4. Visualization + rosbag2: watch the pose estimate track while pushing the car by hand;
    record and replay a bag.
@@ -161,7 +172,14 @@ Main components only — power distribution and wiring not tracked here.
 - Day 2: also write setpoint commands from subscribed topic to serial
 
 ### Phase 4 — Custom interfaces package [Day 1]
-- `follow_me_interfaces`: `UWBReading.msg` (distance + bearing from DW3000 AoA), `CameraBlob.msg`, `FusedPose.msg`
+- `follow_me_interfaces`: `FusedTagPose.msg`
+- **Removed 2026-07-09** to keep the surface minimal; both must be **re-added for Phase 5**
+  (they are the fusion node's inputs). Backups in the session scratchpad; `src/` is untracked
+  in git, so there is no `git show` restore path.
+  - `UWBReading.msg` (distance + bearing from DW3000 AoA) — raw UWB bearing + `valid` fix flag
+    are no longer published anywhere.
+  - `CameraBlob.msg` (blob found + normalized x/y) — camera hardware status is unconfirmed
+    anyway (see Hardware table).
 - `FollowMe.action`
 
 ### Phase 5 — Fusion node [post-interview]
@@ -171,11 +189,15 @@ Main components only — power distribution and wiring not tracked here.
 - Candidate: cogging detection moves here (compare commanded throttle vs encoder motion;
   gate speed/odometry while cogging)
 - Subscribes: `/uwb/reading`, `/imu/data`, `/camera/blob`
-- Publishes: `/follow_me/pose` (`FusedPose`)
+  (**re-add `UWBReading.msg` + `CameraBlob.msg` first — both removed 2026-07-09**)
+- Publishes: `/tag/pose` (`FusedTagPose`)
 
-### Phase 6 — Dead reckoning pose estimator [Day 1]
-- Integrates IMU yaw + RPM odometry into 2D pose in `odom` frame
-- Publishes: `nav_msgs/Odometry`, TF2 `odom → base_link`
+### Phase 6 — Dead reckoning pose estimator ✅
+- Integrates IMU yaw + wheel distance into 2D pose in `odom` frame
+- Publishes: `/odom` (`nav_msgs/Odometry`), TF2 `odom → base_link`
+- Subscribes: `/imu/data` (heading), `/wheel/distance` (accumulated metres)
+- `odom` starts at identity (initial yaw subtracted). Reverse motion is invisible —
+  the odometer does not tick backwards.
 
 ### Phase 7 — ros2_control hardware interface [post-interview]
 - C++ `SystemInterface` plugin replaces Python bridge node
@@ -213,26 +235,28 @@ src/
 ```
 
 ### Build & run
+See [cheat.md](./cheat.md) for the commands that actually work today.
+
 ```bash
-# Build
-cd ~/follow-me-car-ros2
 colcon build --symlink-install
-
-# Source
 source install/setup.bash
+ros2 run follow_me_nodes serial_bridge
 
-# Launch everything
-ros2 launch follow_me_bringup follow_me.launch.py
+# FUTURE — follow_me_bringup does not exist yet. Build it when there are multiple nodes
+# to start together (Phase 6 estimator + Foxglove), not before.
+# ros2 launch follow_me_bringup follow_me.launch.py
 ```
 
 ### Key topics
 | Topic | Type | Direction |
 |-------|------|-----------|
-| `/uwb/reading` | `follow_me_interfaces/UWBReading` | ESP32 → ROS2 |
+| `/uwb/reading` | `follow_me_interfaces/UWBReading` | ESP32 → ROS2 *(removed 2026-07-09; re-add in Phase 5)* |
 | `/imu/data` | `sensor_msgs/Imu` | ESP32 → ROS2 |
-| `/camera/blob` | `follow_me_interfaces/CameraBlob` | ESP32 → ROS2 |
-| `/follow_me/pose` | `follow_me_interfaces/FusedPose` | fusion node output |
-| `/odometry` | `nav_msgs/Odometry` | dead reckoning node output |
+| `/camera/blob` | `follow_me_interfaces/CameraBlob` | ESP32 → ROS2 *(removed 2026-07-09; re-add in Phase 5)* |
+| `/tag/pose` | `follow_me_interfaces/FusedTagPose` | fusion node output (bearing/dist to tag) |
+| `/odom` | `nav_msgs/Odometry` | dead reckoning node output |
+| `/wheel/distance` | `std_msgs/Float32` | accumulated odometer reading, m |
+| `/wheel/speed` | `std_msgs/Float32` | hall-effect speed, m/s |
 | `/cmd_vel` | `geometry_msgs/Twist` | controller → hardware interface |
 
 ### Actions

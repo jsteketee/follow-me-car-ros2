@@ -1,4 +1,21 @@
+# colcon build artifacts
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Editor
+.vscode/
+
+# rosbag2 recordings
+*.db3
+*.mcap
+rosbag2_*/
 
 # Claude Code (local agent config, not tracked)
 CLAUDE.md
 .claude/
+BUILD_LOG.md
