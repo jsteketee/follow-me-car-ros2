@@ -89,7 +89,7 @@ Permanent placement regardless of migration:
 Objective: maximum hands-on ROS2 surface area before the interview, robot driveable at every
 step, zero control retuning.
 
-### Day 1 — data flowing up
+### Day 1 — data flowing up ✅
 1. ESP32 (`ros2-hal`): add `serial_hal.cpp` telemetry stream (50 Hz JSON over USB serial).
    **Strip nothing** — standalone modes keep working.
 2. Pi: `follow_me_interfaces` custom messages + Python bridge node publishing
