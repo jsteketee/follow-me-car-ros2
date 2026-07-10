@@ -13,6 +13,10 @@ Data path up is working (Phases 3–6 ✅). Next: **command path down** — setp
 cmd-timeout failsafe on the ESP32, then a `NavigateToPose` action server and the Goal Pose
 click demo. See PROJECT_PLAN.md Phases 2 and 10 for detail.
 
+Design spec for the command-path phase (interface, failsafe, HAL transition) is drafted at
+[docs/hal-command-path.md](./docs/hal-command-path.md) — settled decisions fold back into
+PROJECT_PLAN once implemented.
+
 ### Open issues 
 - Reverse is invisible — `odo` doesn't tick backwards, so dead reckoning freezes in reverse.
 - UWB only reliable to +/- 60 degrees. 
