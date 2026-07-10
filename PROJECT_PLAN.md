@@ -1,11 +1,17 @@
 # Follow Me Car — ROS2 Project Plan
 
+## Purpose
+
+The durable reference for how this project is meant to work: goals, architecture, serial
+protocol, phase plan, and hardware roster. Authoritative for specs — the design and the plan,
+not their live status or change history (NOTES.md).
+
 ## Goals
 
 1. **Follow-me mode** — car autonomously follows the UWB tag (+ camera fusion), implemented as ROS2 nodes on the Pi.
 2. **Dead reckoning commanded nav** — send the car a heading + distance, or a sequence of waypoints; executed using IMU yaw + RPM odometry. No map or LIDAR required.
 3. **Nav2-compatible interfaces** — implement standard `nav2_msgs/NavigateToPose` and `nav2_msgs/FollowWaypoints` action servers. Compatible with Nav2 if a LIDAR/map is added later.
-4. **(Stretch) Web waypoint canvas** — custom browser UI (rosbridge + roslibjs) for dropping waypoints onto a map view. The same interaction exists in the standard stack first (RViz/Foxglove "Goal Pose" click → `NavigateToPose`), so this is post-interview polish, not core.
+4. **(Stretch) Web waypoint canvas** — custom browser UI (rosbridge + roslibjs) for dropping waypoints onto a map view. The same interaction exists in the standard stack first (RViz/Foxglove "Goal Pose" click → `NavigateToPose`), so this is later polish, not core.
 
 ## Architecture
 
@@ -39,7 +45,7 @@ stamp messages in 1970 and tf2 would silently drop the transforms; the offset ca
 subtraction, so downstream dt is still exact device time.
 `uwb_dist` (cm) + `uwb_bearing` (deg) are Kalman-filtered DW3000 AoA readings; -1 if no fix.
 
-`odo` is the accumulated odometer in **cm** (verified on hardware 2026-07-09).
+`odo` is the accumulated odometer in **cm**.
 
 **Units:** the ESP32 speaks mph / cm / degrees. The bridge node is the boundary and converts
 everything to SI (REP-103: metres, m/s, radians) before publishing, so every ROS2 topic
@@ -48,7 +54,7 @@ downstream is SI by construction and needs no scale factors. Note `fused_unc` is
 `speed`/`odo` are hall-effect derived. `enc_speed` is AS5600 encoder EMA velocity (mph, forward
 positive) for Pi-side cogging detection; `cogging` is the ESP32 latching cogging flag (0/1).
 `fused_angle`/`fused_dist`/`fused_unc` are the ESP32's Kalman-fused bearing, distance, and
-bearing variance — streamed because Pi-side fusion is deferred post-interview.
+bearing variance — streamed because Pi-side fusion comes later.
 
 **Outgoing to ESP32 (on demand, newline-delimited JSON):**
 ```json
@@ -56,14 +62,14 @@ bearing variance — streamed because Pi-side fusion is deferred post-interview.
 ```
 Setpoints feed the ESP32's existing tuned PID loops (see "Control Loop Placement" below). The
 protocol reserves a raw-actuator mode (`{"throttle":0.31,"steering":-0.18}`) for the
-post-interview migration of the loops to the Pi. ESP32 applies a cmd-timeout failsafe: neutral
+later migration of the loops to the Pi. ESP32 applies a cmd-timeout failsafe: neutral
 throttle if no command arrives within the timeout.
 
-## Control Loop Placement — DECIDED (2026-07-04): setpoints first, migrate later
+## Control Loop Placement — setpoints first, migrate later
 
-**Before the interview:** both PID loops (speed + steering) stay on the ESP32, already tuned
+**Initially:** both PID loops (speed + steering) stay on the ESP32, already tuned
 and working. The Pi commands setpoints (`target_speed`, `target_angle`) — no control retuning
-on the critical path. **Post-interview:** migrate loops up to the Pi as the ros2_control
+needed. **Later:** migrate loops up to the Pi as the ros2_control
 custom-controller showcase; the cmd protocol's mode field makes that a config change, not a
 re-architecture.
 
@@ -78,48 +84,11 @@ Permanent placement regardless of migration:
 - **Cogging detection** → Pi fusion node (candidate; see Phase 5). If cogging *recovery*
   needs fast throttle intervention, that reflex may stay ESP32-side even with detection on
   the Pi.
-- **Steering PID** (post-interview migration order: first) — plant time constant 300ms+ at
+- **Steering PID** (migration order: first) — plant time constant 300ms+ at
   2.5 mph; Pi-side latency is invisible.
 - **Speed PID** (migration order: second, and only if it performs) — the one latency-sensitive
   loop (ESC deadband, cogging, stiction at low speed). If Pi-side control underperforms,
   it stays on the ESP32 permanently and that's fine.
-
-## Interview Critical Path (2 focused days)
-
-Objective: maximum hands-on ROS2 surface area before the interview, robot driveable at every
-step, zero control retuning.
-
-### Day 1 — data flowing up ✅
-1. ESP32 (`ros2-hal`): add `serial_hal.cpp` telemetry stream (50 Hz JSON over USB serial).
-   **Strip nothing** — standalone modes keep working.
-2. Pi: `follow_me_interfaces` custom messages + Python bridge node publishing
-   `/imu/data`, `/tag/pose`, `/wheel/speed`, `/wheel/distance`.
-3. Dead-reckoning pose estimator node → `nav_msgs/Odometry` + TF2 `odom → base_link`.
-4. Visualization + rosbag2: watch the pose estimate track while pushing the car by hand;
-   record and replay a bag.
-
-Banked by end of Day 1: packages, colcon, nodes, custom msgs, TF2, odometry, visualization, rosbag2.
-
-### Day 2 — commands flowing down
-5. ESP32: accept `{"target_speed", "target_angle"}` setpoint commands feeding the existing
-   tuned loops + cmd-timeout failsafe to neutral.
-6. Pi: `NavigateToPose` action server — computes bearing/distance to goal from the
-   dead-reckoned pose, streams setpoints, feedback = remaining distance.
-7. **Demo: click Goal Pose on the canvas → car drives to the waypoint.**
-8. If time: `FollowWaypoints` multi-goal missions; single bringup launch file.
-
-### Consciously deferred (post-interview)
-- Fusion node on the Pi (ESP32 fusion keeps running; its output is streamed)
-- ros2_control C++ hardware interface + custom controller (loop migration)
-- Follow-me action server
-- Custom web waypoint canvas (Goal 4) — RViz/Foxglove Goal Pose covers the demo interaction
-- Stripping fusion/nav/control out of the ESP32 firmware
-
-### Critical-path risks
-- **Visualization host**: ROS2/RViz on macOS is effectively unsupported — do not burn hours
-  there. Recommended: Foxglove Studio on the Mac connected to `foxglove_bridge` on the Pi
-  (native Mac app, no Mac ROS2 install, supports click-to-publish goal poses). Decide first
-  thing Day 1.
 
 ## Hardware
 
@@ -133,17 +102,17 @@ Main components only — power distribution and wiring not tracked here.
 | Hall-effect sensor | RPM / speed | ✅ |
 | AS5600 encoder (I2C) | cogging detection | ✅ installed & validated |
 | BNO085 IMU (I2C) | yaw for dead reckoning + fusion | ✅ |
-| OV2640 on XIAO ESP32-S3 (I2C) | blob camera (optional, deferred) | ⚠️ confirm status |
+| OV2640 on XIAO ESP32-S3 (I2C) | blob camera (optional, later) | ⚠️ confirm status |
 | SSD1306 OLED | on-car display | ✅ |
 | Open-frame RC chassis + 2S LiPo | vehicle | ✅ |
 
 ## ROS2 Skills Showcased
 
-- `ros2_control` hardware interface (C++ plugin) *(post-interview)*
-- Custom ros2_control controller *(post-interview)*
+- `ros2_control` hardware interface (C++ plugin)
+- Custom ros2_control controller
 - Custom message and action types
 - Action servers (Nav2-compatible nav + follow-me)
-- Sensor fusion node (Kalman filter on absolute compass bearing) *(post-interview)*
+- Sensor fusion node (Kalman filter on absolute compass bearing)
 - Dead reckoning pose estimator (IMU + RPM → `nav_msgs/Odometry` + TF2)
 - TF2 transforms (`odom` → `base_link`)
 - RViz/Foxglove visualization
@@ -153,43 +122,46 @@ Main components only — power distribution and wiring not tracked here.
 
 ## Implementation Phases
 
+Loosely sequential — the order is a guide, not a commitment; priorities get decided as the
+work progresses. ✅ marks what's built (the single source for phase status).
+
 ### Phase 1 — Hardware setup ✅
 - Flash Pi with Ubuntu 24.04, install ROS2 Jazzy
 - Connect Pi to ESP32 via USB serial
 - Verify serial communication (minicom / Python script)
 
-### Phase 2 — ESP32 HAL firmware [Day 1–2: additive only]
-- Day 1: add `serial_hal.cpp` telemetry stream (50 Hz sensor JSON out) — strip nothing,
-  standalone modes keep working
-- Day 2: accept setpoint commands (`target_speed`, `target_angle`) + cmd-timeout failsafe
-- Post-interview: strip `fusion.cpp`, `nav.cpp`, `control.cpp` down to a pure HAL as the
-  loops migrate to the Pi
+### Phase 2 — ESP32 HAL firmware
+- Add `serial_hal.cpp` telemetry stream (50 Hz sensor JSON out) — strip nothing, standalone
+  modes keep working
+- Accept setpoint commands (`target_speed`, `target_angle`) + cmd-timeout failsafe
+- Later: strip `fusion.cpp`, `nav.cpp`, `control.cpp` down to a pure HAL as the loops migrate
+  to the Pi
 - Keep WiFi + dashboard for side-by-side debugging during transition
 
-### Phase 3 — ROS2 bridge node [Day 1]
+### Phase 3 — ROS2 bridge node
 - Python node: read serial frames, publish raw sensor topics
 - Confirm data in `ros2 topic echo` and the visualizer
-- Day 2: also write setpoint commands from subscribed topic to serial
+- Also write setpoint commands from subscribed topic to serial
 
-### Phase 4 — Custom interfaces package [Day 1]
+### Phase 4 — Custom interfaces package
 - `follow_me_interfaces`: `FusedTagPose.msg`
-- **Removed 2026-07-09** to keep the surface minimal; both must be **re-added for Phase 5**
-  (they are the fusion node's inputs). Backups in the session scratchpad; `src/` is untracked
-  in git, so there is no `git show` restore path.
+- `UWBReading.msg` + `CameraBlob.msg` were **removed** to keep the surface minimal; both must
+  be **re-added for Phase 5** (they are the fusion node's inputs). Backups in the session
+  scratchpad; `src/` is untracked in git, so there is no `git show` restore path.
   - `UWBReading.msg` (distance + bearing from DW3000 AoA) — raw UWB bearing + `valid` fix flag
     are no longer published anywhere.
   - `CameraBlob.msg` (blob found + normalized x/y) — camera hardware status is unconfirmed
     anyway (see Hardware table).
 - `FollowMe.action`
 
-### Phase 5 — Fusion node [post-interview]
+### Phase 5 — Fusion node
 - DW3000 provides bearing directly — no trilateration needed. Fusion blends UWB bearing +
   camera blob angle on absolute compass bearing (port the Kalman scheme from `fusion.cpp`),
   and tracks uncertainty
 - Candidate: cogging detection moves here (compare commanded throttle vs encoder motion;
   gate speed/odometry while cogging)
 - Subscribes: `/uwb/reading`, `/imu/data`, `/camera/blob`
-  (**re-add `UWBReading.msg` + `CameraBlob.msg` first — both removed 2026-07-09**)
+  (**re-add `UWBReading.msg` + `CameraBlob.msg` first**)
 - Publishes: `/tag/pose` (`FusedTagPose`)
 
 ### Phase 6 — Dead reckoning pose estimator ✅
@@ -199,29 +171,32 @@ Main components only — power distribution and wiring not tracked here.
 - `odom` starts at identity (initial yaw subtracted). Reverse motion is invisible —
   the odometer does not tick backwards.
 
-### Phase 7 — ros2_control hardware interface [post-interview]
+### Phase 7 — ros2_control hardware interface
 - C++ `SystemInterface` plugin replaces Python bridge node
 - `read()`: parse serial frame → fill state interfaces
 - `write()`: serialize command interfaces → send to ESP32
 - Works with setpoint commands too (velocity command interface) — does not require the
   loop migration
 
-### Phase 8 — Follow-me controller [post-interview — loop migration]
+### Phase 8 — Follow-me controller
 - ros2_control controller (or standalone node)
 - Steering PID first (`fused_angle` → steering), speed PID second and only if it performs
 - Ports the tuned gains from the ESP32's `control.cpp`
 
-### Phase 9 — Follow-me action server [post-interview]
+### Phase 9 — Follow-me action server
 - `/follow_me` action: goal = start/stop, feedback = distance + angle + uncertainty, result = reason stopped
 
-### Phase 10 — Dead reckoning nav action servers [Day 2]
+### Phase 10 — Dead reckoning nav action servers
 - `/navigate_to_pose` (`nav2_msgs/NavigateToPose`): dead reckoning single goal
-- `/follow_waypoints` (`nav2_msgs/FollowWaypoints`): ordered waypoint missions (if time)
+- `/follow_waypoints` (`nav2_msgs/FollowWaypoints`): ordered waypoint missions
 
-### Phase 11 — Visualization + launch files [Day 1–2 partial; polish post-interview]
+### Phase 11 — Visualization + launch files
 - Foxglove/RViz config: heading arrow, path trace, sensor status markers
 - Single launch file starts everything
 - rosbag2 recording in launch file
+- **Visualization host:** ROS2/RViz on macOS is effectively unsupported — use Foxglove Studio
+  on the Mac connected to `foxglove_bridge` on the Pi (native Mac app, no Mac ROS2 install,
+  supports click-to-publish goal poses)
 
 ## Repository Reference
 
@@ -250,9 +225,9 @@ ros2 run follow_me_nodes serial_bridge
 ### Key topics
 | Topic | Type | Direction |
 |-------|------|-----------|
-| `/uwb/reading` | `follow_me_interfaces/UWBReading` | ESP32 → ROS2 *(removed 2026-07-09; re-add in Phase 5)* |
+| `/uwb/reading` | `follow_me_interfaces/UWBReading` | ESP32 → ROS2 *(removed; re-add in Phase 5)* |
 | `/imu/data` | `sensor_msgs/Imu` | ESP32 → ROS2 |
-| `/camera/blob` | `follow_me_interfaces/CameraBlob` | ESP32 → ROS2 *(removed 2026-07-09; re-add in Phase 5)* |
+| `/camera/blob` | `follow_me_interfaces/CameraBlob` | ESP32 → ROS2 *(removed; re-add in Phase 5)* |
 | `/tag/pose` | `follow_me_interfaces/FusedTagPose` | fusion node output (bearing/dist to tag) |
 | `/odom` | `nav_msgs/Odometry` | dead reckoning node output |
 | `/wheel/distance` | `std_msgs/Float32` | accumulated odometer reading, m |

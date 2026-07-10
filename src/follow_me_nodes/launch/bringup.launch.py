@@ -6,6 +6,7 @@ Brings up:
                          and -> /robot_description, which Foxglove renders as the car
   serial_bridge          ESP32 JSON telemetry -> ROS2 topics
   pose_estimator         IMU heading + wheel odometry -> odom -> base_link on /tf
+  tag_broadcaster        tag/pose (bearing+dist) -> uwb_link -> tag_link on /tf
   foxglove_bridge        websocket for the Foxglove 3D panel (optional)
 
 Launch arguments:
@@ -77,6 +78,14 @@ def generate_launch_description():
             package="follow_me_nodes",
             executable="pose_estimator",
             name="pose_estimator",
+            namespace=namespace,
+            output="screen",
+        ),
+
+        Node(
+            package="follow_me_nodes",
+            executable="tag_broadcaster",
+            name="tag_broadcaster",
             namespace=namespace,
             output="screen",
         ),

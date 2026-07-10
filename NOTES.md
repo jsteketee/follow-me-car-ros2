@@ -1,61 +1,23 @@
 # Notes
 
+## Purpose
+
+The running state of the project: current focus, build log, navigation modes, brainstorming,
+open questions, and hardware setup notes. Authoritative for what's true and decided
+right now — the live counterpart to PROJECT_PLAN.md's durable specs.
+
 ## To Do
 
-### Current Sprint
-- [x] Get a 5V/3A USB-C power supply for Pi desk development
-- [x] Flash Pi with Ubuntu 24.04 Server (64-bit) via Raspberry Pi Imager
-- [x] Install ROS2 Jazzy on Pi (verified with `ros2 topic list`)
-- [x] Verify SSH access from Mac (`ssh ubuntu@followme-pi.local`)
-- [x] Validate DW3000 anchor/tag hardware end-to-end (discovery, pairing, both JSON and binary ranging output) — see DW3000 section below
-- [x] Rewrite `uwb.cpp`/`fusion.cpp` on `follow-me-car-esp32` to consume the DW3000 protocol instead of RYUW122 trilateration (committed on main; old trilateration preserved via tag `v2.0-three-anchor-uwb`)
-- [x] Integrate AS5600 magnetic encoder — role settled as cogging detection; hall-effect sensor stays for RPM/speed
-- [x] Fast-forward `ros2-hal` branch to validated main (2495c85) and push to GitHub — HAL work starts from here
-- [ ] **Interview sprint Day 1**: serial_hal telemetry stream (strip nothing) → bridge node + custom msgs → dead-reckoning pose estimator + TF2 → Foxglove/rosbag (see PROJECT_PLAN.md "Interview Critical Path")
-- [ ] **Interview sprint Day 2**: setpoint cmd path + failsafe on ESP32 → NavigateToPose action server → Goal Pose click demo
+### Current focus
+Data path up is working (Phases 3–6 ✅). Next: **command path down** — setpoint cmd path +
+cmd-timeout failsafe on the ESP32, then a `NavigateToPose` action server and the Goal Pose
+click demo. See PROJECT_PLAN.md Phases 2 and 10 for detail.
 
----
+### Open issues 
+- Reverse is invisible — `odo` doesn't tick backwards, so dead reckoning freezes in reverse.
+- UWB only reliable to +/- 60 degrees. 
 
-## Hardware Updates (Planned)
-
-### DW3000 AoA UWB — replaces 3x RYUW122
-- Hardware: Makerfabs [MaUWB STM32 AOA Development Kit](https://www.makerfabs.com/mauwb-stm32-aoa-development-kit.html) — anchor + tag pair, STM32F103C8T6 + Qorvo DW3000, dual antenna
-- Correction: this is STM32-based, not ESP32-based as originally assumed. No onboard ESP32 co-processor.
-- Controlled over UART1, same physical pattern as the RYUW122s, but a different command syntax — bare `CMDNAME arg1 arg2...` (not `AT+CMD=`) — confirmed via firmware repo `Makerfabs/UWB-AOA-with-Display-STM32F103C8T6`
-- Spec (from that repo's README): angle ±60°, angle error ±5°, ranging error <10cm, positioning error <10cm, coverage radius 30m@6.8Mbps
-- Note: the generic `Makerfabs/MaUWB_ESP32S3-with-STM32-AT-Command` repo (range-only, no angle field in `AT+RANGE`) is a DIFFERENT product line — don't confuse the two when looking up firmware/docs
-- One board on car as anchor, one as tag (carried by person or mounted on Car 2)
-- Main ESP32-S3 reads anchor's UART output, aggregates into existing JSON serial frame to Pi — single serial connection preserved
-- Serial protocol changes: `uwb_l/uwb_r/uwb_f` → `uwb_dist` + `uwb_bearing`
-- Eliminates all 3-anchor cycling logic in uwb.cpp and most of the trilateration in fusion.cpp
-- Firmware ships factory-flashed; ST-Link only needed if updating module firmware (repo has default `Project_Anchor_v1.0.hex` / `Project_Tag_v1.0.hex`)
-- Plan: install on `main` first to validate hardware before folding into `ros2-hal`
-
-**Hardware validated end-to-end (bench test, 2026-07-02).** Anchor talks over UART1 (`TXD1`/`RXD1` header pins, 115200 baud) — not native USB CDC. Two report modes:
-- Default JSON: `"JS"` + 4 hex-digit length + JSON payload, e.g. `{"TWR":{"a16":"E1AE","D":50,"Xcm":19,"Ycm":48,...}}` — bearing = `atan2(Xcm, Ycm)`.
-- Binary "carfollow" mode (`USER_CMD 1` + `save`): fixed 31-byte frame, `0x2A` header, length byte, payload (`sn`, `addr16`, `angle` int32, `distance` int32 cm, plus power/accel fields), XOR checksum, `0x23` footer. Pre-computed `angle`/`distance` as plain ints — no parsing math needed on the ESP32 side.
-
-**Pairing required before ranging starts** (once per tag, persists across power cycles): anchor auto-discovers the tag over UWB and emits an unsolicited `"NewTag":"<64-bit hex id>"` JSON message; host must reply `addtag <id64> <addr16> 0001 64 00` then `save` to bind it into the anchor's known-tag list (`fastrate=1`=10Hz, `useIMU=0` — matches Makerfabs' own Windows GUI defaults).
-
-**Gotcha hit during validation:** `addtag` initially failed with `error function` (handler returned NULL) even though the known-tag list wasn't full (1/9 slots used) — root cause never fully pinned down in source, but a factory reset (`RTOKEN` command) cleared whatever stale/corrupted flash state was blocking it. If `addtag` fails on a fresh board, try `RTOKEN` first.
-
-**Known limitation — AoA field of view (recorded 2026-07-04):** bearing is only reliable
-within roughly ±60°; past ~90° the anchor cannot distinguish front from back (a single
-dual-antenna pair has inherent front/back ambiguity — the same problem the old third RYUW122
-anchor existed to resolve). Bench signature: with the tag outside the cone, reported angle
-pins at exactly ±90 with no sample-to-sample jitter — a detectable clamp, not a plausible
-measurement. Implication: a tag behind the car produces confidently wrong bearings; naive
-bearing-following can steer on a false assumption. Mitigation direction: see "Follow-me as
-waypoint planning with recovery" in brainstorming below.
-
-Bench test firmware lives in `follow-me-car-esp32` on `main` (does not touch the real car firmware — isolated via `build_src_filter` + separate `lib_deps`):
-- `src/dw3000_test.cpp` / `pio run -e dw3000-test` — automated: switches anchor to binary mode, auto-pairs on `NewTag`, logs parsed frames.
-- `src/dw3000_bridge.cpp` / `pio run -e dw3000-bridge` — transparent UART passthrough for manual command/response testing (typed into `pio device monitor`, or driven directly via a pyserial script for fast iteration without rebuilding).
-
-### Magnetic encoder — replaces hall effect RPM sensor
-- Module TBD (likely AS5600 or AS5048)
-- Higher resolution odometry → better dead reckoning accuracy
-- Contained change: rewrites rpm.cpp driver only
+### Open questions
 
 ---
 
@@ -69,7 +31,7 @@ Bench test firmware lives in `follow-me-car-esp32` on `main` (does not touch the
 ### Mode 2 — Single car, camera-based person following
 - Primary sensor: camera with person detection algorithm (no wearable required)
 - Servo-actuated camera pan to keep person in frame
-- Camera decision (2026-07-04): **add a camera attached directly to the Pi** rather than
+- Camera decision: **add a camera attached directly to the Pi** rather than
   streaming from the existing XIAO/OV2640 — its I2C link can't carry pixels, and WiFi/USB
   streaming firmware is hassle for a worse result. The mounted XIAO stays as-is (optional
   blob sensor only)
@@ -96,7 +58,7 @@ Bench test firmware lives in `follow-me-car-esp32` on `main` (does not touch the
 - OAK-D Lite — enables camera-based person detection (Mode 2) + stereo depth
 
 ### Future software ideas
-- **Follow-me as waypoint planning with recovery (2026-07-04)** — response to the AoA ±60°
+- **Follow-me as waypoint planning with recovery** — response to the AoA ±60°
   FOV limitation above. Instead of steering directly on the instantaneous UWB bearing,
   convert confident tag fixes into waypoints in the `odom` frame and follow those. Anomalous
   UWB readings (angle clamped at ±90, bearing jump inconsistent with dead-reckoned motion,
@@ -105,7 +67,7 @@ Bench test firmware lives in `follow-me-car-esp32` on `main` (does not touch the
   goal-updating on the same nav machinery as waypoint missions, unifying Mode 1 with the
   commanded-nav system.
 
-  Sketched recovery behavior (2026-07-04):
+  Sketched recovery behavior:
   1. When bearing approaches/exits the reliable cone (|bearing| past ~60°), store the last
      confident tag location.
   2. Set a recovery goal that turns the robot until its compass heading faces that stored
@@ -135,8 +97,55 @@ Bench test firmware lives in `follow-me-car-esp32` on `main` (does not touch the
 - Multi-tag support — follow one of several tagged people
 - Return-to-home behavior when tag is lost for too long
 
-### Open questions
-- What connector does the LiPo use? (needed to order battery splitter)
-- Should the Pi host its own WiFi AP (like the ESP32 does) or connect to home network? Tradeoff: AP mode works anywhere, home network mode gives internet access on the Pi.
-- ros2_control controller vs standalone node for PID — worth deciding before Phase 7
-- How to preserve the RYUW122 3-anchor trilateration code once `uwb.cpp`/`fusion.cpp` are rewritten for DW3000 — discussed tag + branch + `#ifdef`/build-env approach early on but never implemented; needs a decision before starting the rewrite (see chat 2026-07-02)
+---
+
+## Build Log
+
+What's been built, newest first. Release-notes style — one line per change. Gotchas at the bottom.
+
+### 2026-07-10
+- `tag_broadcaster.py`: subscribes `tag/pose`, broadcasts `uwb_link → tag_link` on `/tf` per fix (~10 Hz) — the DW3000 tag now shows as a moving TF frame.
+- Parented under `uwb_link` (the anchor), not `base_link`: matches where the bearing/distance are actually measured, and tf2 chains `odom → base_link → uwb_link → tag_link` so the tag's absolute position comes for free with no drift baked into a stored edge.
+- Anchor is rpy=0 vs base_link, so bearing needs no rotation offset: `x = d·cos(angle)`, `y = d·sin(angle)`; identity rotation (a point has none).
+- Skips broadcast when `distance <= 0` (ESP32 sends -1 on no fix) — no phantom tag at the origin.
+- Added to `bringup.launch.py` + `setup.py` entry points.
+
+### 2026-07-09
+- URDF + robot_state_publisher: RSP publishes `base_link → {chassis, body, 4 wheels, imu_link, uwb_link}` from `follow_me_car.urdf`; fixes the dangling `imu_link`.
+- URDF is box/cylinder primitives (Foxglove can't resolve `package://` meshes); dimensions and IMU/uwb positions are estimates — measure and correct.
+- All URDF joints fixed (continuous would demand a `/joint_states` stream we don't publish).
+- `bringup.launch.py`: RSP + serial_bridge + pose_estimator + foxglove_bridge (`foxglove:=false` to skip).
+- Phase 6: `pose_estimator.py` dead reckoning — publishes `/odom` + TF `odom → base_link`; differences the odometer, projects along midpoint heading; heading from IMU, never integrated; `odom` starts at identity.
+- rosbag2 record + replay verified: raw topics → `--clock` replay into the estimator (`use_sim_time:=true`), pose retraces in Foxglove with no hardware.
+- `src/` now tracked + pushed to GitHub (`.gitignore` was missing build/install/log).
+- Bridge: maps ESP32 uptime → ROS clock; converts to SI at the boundary; topic names relative (runtime namespace).
+- Renames: `wheel/odometry` → `wheel/distance`; `FusedPose` → `FusedTagPose` (+ heading field); `/follow_me/pose` → `/tag/pose`.
+- Removed `UWBReading.msg` + `CameraBlob.msg` — Phase 5 must re-add.
+
+### 2026-07-08
+- Phases 3–4: `follow_me_interfaces` (custom msgs) + `follow_me_nodes/serial_bridge.py` — reads ESP32 JSON over USB serial, skips ESP-IDF logs, reconnects on drop, publishes 4 topics.
+- Verified on hardware: `/imu/data` ~44 Hz, values move in Foxglove.
+- Created CLAUDE.md and cheat.md.
+
+---
+
+## Hardware Setup Notes
+
+Nitty-gritty for re-setting-up a replacement board — just what's needed to get a fresh unit talking again, not project history.
+
+### DW3000 AoA UWB
+
+- Anchor talks over UART1 (`TXD1`/`RXD1` header pins, 115200 baud) — not native USB CDC.
+- Command syntax is bare `CMDNAME arg1 arg2...` (not `AT+CMD=`) — confirmed via firmware repo `Makerfabs/UWB-AOA-with-Display-STM32F103C8T6`.
+- Note: the generic `Makerfabs/MaUWB_ESP32S3-with-STM32-AT-Command` repo (range-only, no angle field in `AT+RANGE`) is a DIFFERENT product line — don't confuse the two when looking up firmware/docs.
+- Firmware ships factory-flashed; ST-Link only needed if updating module firmware (repo has default `Project_Anchor_v1.0.hex` / `Project_Tag_v1.0.hex`).
+
+**Two report modes:**
+- Default JSON: `"JS"` + 4 hex-digit length + JSON payload, e.g. `{"TWR":{"a16":"E1AE","D":50,"Xcm":19,"Ycm":48,...}}` — bearing = `atan2(Xcm, Ycm)`.
+- Binary "carfollow" mode (`USER_CMD 1` + `save`): fixed 31-byte frame, `0x2A` header, length byte, payload (`sn`, `addr16`, `angle` int32, `distance` int32 cm, plus power/accel fields), XOR checksum, `0x23` footer. Pre-computed `angle`/`distance` as plain ints — no parsing math needed on the ESP32 side.
+
+**Pairing required before ranging starts** (once per tag, persists across power cycles): anchor auto-discovers the tag over UWB and emits an unsolicited `"NewTag":"<64-bit hex id>"` JSON message; host must reply `addtag <id64> <addr16> 0001 64 00` then `save` to bind it into the anchor's known-tag list (`fastrate=1`=10Hz, `useIMU=0` — matches Makerfabs' own Windows GUI defaults).
+
+**Gotcha:** `addtag` can fail with `error function` (handler returns NULL) even when the known-tag list isn't full — a factory reset (`RTOKEN` command) clears the stale flash state. If `addtag` fails on a fresh board, try `RTOKEN` first.
+
+

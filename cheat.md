@@ -1,6 +1,8 @@
 # Cheat Sheet
 
-Common commands for this project. Add to this as you go.
+## Purpose
+
+Commands that work today for building, running, and inspecting the stack. Add to this as you go.
 
 ## Build
 
@@ -17,9 +19,8 @@ source install/setup.bash              # overlay: makes our packages + msgs visi
 ### Run
 ```bash
 # Whole stack: robot_state_publisher + serial_bridge + pose_estimator + foxglove_bridge
-ros2 launch follow_me_nodes bringup.launch.py
-ros2 launch follow_me_nodes bringup.launch.py foxglove:=false     # bridge already running
 ros2 launch follow_me_nodes bringup.launch.py namespace:=fmbot    # -> /fmbot/tag/pose
+ros2 launch follow_me_nodes bringup.launch.py foxglove:=false     # bridge already running
 ```
 
 ```bash
@@ -35,8 +36,10 @@ ros2 run follow_me_nodes serial_bridge --ros-args -r __ns:=/fmbot      # -> /fmb
 ```bash
 check_urdf install/follow_me_nodes/share/follow_me_nodes/urdf/follow_me_car.urdf  # parse + print tree
 ros2 topic echo /robot_description --once        # latched; empty output = RSP never parsed it
-ros2 run tf2_ros tf2_echo base_link imu_link     # proves the frame is no longer dangling
 ros2 topic echo /tf_static --once                # the URDF's fixed joints
+ros2 run tf2_tools view_frames        # generates frames.gv — cat it for a text edge list
+ros2 topic echo /tf_static --once     # the static edges (parent→child pairs)
+ros2 topic echo /tf                    # the moving edges, streaming
 ```
 
 **Rendering the car in Foxglove:** 3D panel → panel settings → *Custom layers* → *Add URDF*
@@ -102,14 +105,15 @@ pio device monitor                     # serial monitor
 ## Architecture
 ### Nodes
 ```
-src/follow_me_nodes/follow_me_nodes/serial_bridge.py   # parses esp32 json and publishes
-src/follow_me_nodes/follow_me_nodes/pose_estimator.py  # imu heading + wheel odom -> 2D pose
+src/follow_me_nodes/follow_me_nodes/serial_bridge.py    # parses esp32 json and publishes
+src/follow_me_nodes/follow_me_nodes/pose_estimator.py   # imu heading + wheel odom -> 2D pose
+src/follow_me_nodes/follow_me_nodes/tag_broadcaster.py  # tag/pose bearing+dist -> uwb_link->tag_link tf
 ```
 
 ### Description / launch
 ```
 src/follow_me_nodes/urdf/follow_me_car.urdf     # Traxxas 1/16 E-Revo, box+cylinder primitives
-src/follow_me_nodes/launch/bringup.launch.py    # RSP + serial_bridge + pose_estimator + foxglove
+src/follow_me_nodes/launch/bringup.launch.py    # RSP + serial_bridge + pose_estimator + tag_broadcaster + foxglove
 ```
 
 ### TF tree
@@ -117,6 +121,7 @@ src/follow_me_nodes/launch/bringup.launch.py    # RSP + serial_bridge + pose_est
 odom -> base_link          pose_estimator, /tf, per IMU frame (~50 Hz)
 base_link -> imu_link      robot_state_publisher, /tf_static, from the URDF
 base_link -> uwb_link      robot_state_publisher, /tf_static, from the URDF
+uwb_link -> tag_link       tag_broadcaster, /tf, per tag fix (~10 Hz); skipped when no fix
 base_link -> {chassis,body,4x wheel}_link   robot_state_publisher, /tf_static
 ```
 
@@ -128,9 +133,8 @@ src/follow_me_interfaces/msg/FusedTagPose.msg
 
 ### Docs (source of truth)
 ```
-PROJECT_PLAN.md   # goals, architecture, serial protocol, phased plan. Authoritative.
-NOTES.md          # running notes, hardware validation, open questions. Authoritative.
-BUILD_LOG.md      # what's been built, newest first.
+PROJECT_PLAN.md   # goals, architecture, serial protocol, phased plan. Authoritative for specs.
+NOTES.md          # running state: focus, build log, hardware validation, open questions. Authoritative for current state.
 cheat.md          # this file — commands.
 ```
 

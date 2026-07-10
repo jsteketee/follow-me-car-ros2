@@ -211,7 +211,9 @@ class SerialBridge(Node):
         # --- ESP32 fused output (bearing/distance to the tag), converted to SI ---
         fused = FusedTagPose()
         self._stamp_from_ts(fused.header, ts)
-        fused.angle = float(f.get("fused_angle", 0.0)) * DEG_TO_RAD  # deg -> rad
+        # Negate: the DW3000 reports azimuth +ve = tag to the RIGHT, but REP-103
+        # (and every consumer of this message) expects +ve = LEFT (CCW about +z).
+        fused.angle = -float(f.get("fused_angle", 0.0)) * DEG_TO_RAD  # deg -> rad, sign-corrected
         fused.distance = float(f.get("fused_dist", 0.0)) * CM_TO_M  # cm -> m
         # Variance, not an angle: scales by the SQUARE of the unit factor.
         fused.uncertainty = float(f.get("fused_unc", 0.0)) * DEG2_TO_RAD2  # deg^2 -> rad^2

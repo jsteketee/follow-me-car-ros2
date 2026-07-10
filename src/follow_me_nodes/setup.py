@@ -28,6 +28,7 @@ setup(
         "console_scripts": [
             "serial_bridge = follow_me_nodes.serial_bridge:main",
             "pose_estimator = follow_me_nodes.pose_estimator:main",
+            "tag_broadcaster = follow_me_nodes.tag_broadcaster:main",
         ],
     },
 )
