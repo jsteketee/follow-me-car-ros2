@@ -15,6 +15,10 @@ __pycache__/
 *.mcap
 rosbag2_*/
 
+# tf2_tools view_frames output
+frames_*.gv
+frames_*.pdf
+
 # Claude Code (local agent config, not tracked)
 CLAUDE.md
 .claude/
