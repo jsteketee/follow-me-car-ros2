@@ -11,14 +11,37 @@ colcon build --symlink-install         # builds both packages in dependency orde
 source install/setup.bash              # overlay: makes our packages + msgs visible to this shell
 ```
 
+> `--symlink-install` symlinks Python source, but NOT `data_files` (urdf/, launch/).
+> Editing the URDF or the launch file needs a `colcon build` to reach `install/share/`.
+
 ### Run
 ```bash
+# Whole stack: robot_state_publisher + serial_bridge + pose_estimator + foxglove_bridge
+ros2 launch follow_me_nodes bringup.launch.py
+ros2 launch follow_me_nodes bringup.launch.py foxglove:=false     # bridge already running
+ros2 launch follow_me_nodes bringup.launch.py namespace:=fmbot    # -> /fmbot/tag/pose
+```
+
+```bash
+# Or piecemeal, one node per terminal:
 ros2 launch foxglove_bridge foxglove_bridge_launch.xml
 # Python edits (serial_bridge.py): symlinked by --symlink-install -> NO rebuild, just re-run
 ros2 run follow_me_nodes serial_bridge                       
 ros2 run follow_me_nodes pose_estimator                      # separate terminal
 ros2 run follow_me_nodes serial_bridge --ros-args -r __ns:=/fmbot      # -> /fmbot/tag/pose
 ```
+
+## URDF / robot model
+```bash
+check_urdf install/follow_me_nodes/share/follow_me_nodes/urdf/follow_me_car.urdf  # parse + print tree
+ros2 topic echo /robot_description --once        # latched; empty output = RSP never parsed it
+ros2 run tf2_ros tf2_echo base_link imu_link     # proves the frame is no longer dangling
+ros2 topic echo /tf_static --once                # the URDF's fixed joints
+```
+
+**Rendering the car in Foxglove:** 3D panel → panel settings → *Custom layers* → *Add URDF*
+→ set source to **Topic** → `/robot_description`. Set the panel's *Display frame* to `odom`
+so the car drives across a fixed world instead of sitting still at the origin.
 
 
 
@@ -81,6 +104,20 @@ pio device monitor                     # serial monitor
 ```
 src/follow_me_nodes/follow_me_nodes/serial_bridge.py   # parses esp32 json and publishes
 src/follow_me_nodes/follow_me_nodes/pose_estimator.py  # imu heading + wheel odom -> 2D pose
+```
+
+### Description / launch
+```
+src/follow_me_nodes/urdf/follow_me_car.urdf     # Traxxas 1/16 E-Revo, box+cylinder primitives
+src/follow_me_nodes/launch/bringup.launch.py    # RSP + serial_bridge + pose_estimator + foxglove
+```
+
+### TF tree
+```
+odom -> base_link          pose_estimator, /tf, per IMU frame (~50 Hz)
+base_link -> imu_link      robot_state_publisher, /tf_static, from the URDF
+base_link -> uwb_link      robot_state_publisher, /tf_static, from the URDF
+base_link -> {chassis,body,4x wheel}_link   robot_state_publisher, /tf_static
 ```
 
 ### Custom Messages

@@ -1,0 +1,223 @@
+<?xml version="1.0"?>
+<!--
+  follow_me_car.urdf — physical description of the follow-me RC car.
+  Chassis: Traxxas 1/16 Mini E-Revo (4WD monster truck).
+
+  Two jobs:
+    1. Gives robot_state_publisher the fixed joints it needs to put sensor frames
+       (imu_link, uwb_link) on /tf_static, connecting them to base_link. Without this
+       the IMU's frame_id dangles: messages reference a frame that isn't in the TF tree.
+    2. Published on /robot_description, which Foxglove's 3D panel renders as a solid
+       model of the car instead of a bare axis triad.
+
+  Geometry is primitives only (box / cylinder) — no meshes. Mesh files would need
+  package:// URIs, which Foxglove cannot resolve over the bridge. A monster truck
+  therefore reads as: low chassis plate, body shell above it, four tall tires,
+  generous ground clearance.
+
+  Frame conventions (REP-103): x forward, y left, z up. base_link sits on the ground
+  plane at the centre of the wheelbase, so z=0 is where the tyres touch.
+
+  ===========================================================================
+  DIMENSIONS (metres) — APPROXIMATE, from published E-Revo figures. MEASURE THE
+  REAL CAR AND CORRECT THESE. Every `origin` below is derived from this table:
+
+    overall length     0.324
+    overall width      0.290   (across the tyres)
+    wheelbase          0.216   -> wheel centres at x = +/- 0.108
+    track              0.226   -> wheel centres at y = +/- 0.113
+    tyre radius        0.048   (~96 mm diameter)
+    tyre width         0.042
+    ground clearance   0.030   -> chassis plate underside
+  ===========================================================================
+-->
+<robot name="follow_me_car">
+
+  <!-- ================= materials ================= -->
+  <material name="chassis_grey">
+    <color rgba="0.20 0.21 0.24 1.0"/>
+  </material>
+  <material name="body_red">
+    <color rgba="0.80 0.12 0.12 1.0"/>
+  </material>
+  <material name="tyre_black">
+    <color rgba="0.07 0.07 0.07 1.0"/>
+  </material>
+  <material name="sensor_teal">
+    <color rgba="0.0 0.65 0.65 1.0"/>
+  </material>
+  <material name="uwb_orange">
+    <color rgba="0.95 0.45 0.10 1.0"/>
+  </material>
+
+  <!-- =================================================================
+       base_link — the robot's root frame. No geometry: it is the datum
+       that odom -> base_link (from pose_estimator) attaches to.
+       ================================================================= -->
+  <link name="base_link"/>
+
+  <!-- Chassis plate: the narrow tub the drivetrain bolts to, riding low
+       between the tyres. Underside sits at the ground clearance height. -->
+  <link name="chassis_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.280 0.080 0.020"/>
+      </geometry>
+      <material name="chassis_grey"/>
+    </visual>
+  </link>
+  <!-- plate centre = clearance (0.030) + half plate thickness (0.010) -->
+  <joint name="base_to_chassis" type="fixed">
+    <parent link="base_link"/>
+    <child link="chassis_link"/>
+    <origin xyz="0 0 0.040" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Body shell: the painted lexan cab that gives the truck its silhouette.
+       Sits above the plate, inboard of the tyres, shorter than the wheelbase
+       span so the wheels stay proud of it. -->
+  <link name="body_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.230 0.140 0.070"/>
+      </geometry>
+      <material name="body_red"/>
+    </visual>
+  </link>
+  <!-- shell centre = plate top (0.050) + half shell height (0.035) -->
+  <joint name="base_to_body" type="fixed">
+    <parent link="base_link"/>
+    <child link="body_link"/>
+    <origin xyz="0 0 0.085" rpy="0 0 0"/>
+  </joint>
+
+  <!-- =================================================================
+       wheels — all four are FIXED joints, not continuous. Continuous
+       joints would make robot_state_publisher demand a /joint_states
+       stream we do not publish; it would warn forever and the wheels
+       would never move anyway. Fixed keeps the tree clean. Revisit only
+       if rendering wheel spin or steering angle is worth the plumbing.
+
+       Cylinders are born about z, so rpy rolls them onto the y axis.
+       Centres: x = +/-0.108 (wheelbase), y = +/-0.113 (track),
+       z = tyre radius, which is what puts base_link on the ground.
+       ================================================================= -->
+  <link name="front_left_wheel">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.048" length="0.042"/>
+      </geometry>
+      <material name="tyre_black"/>
+    </visual>
+  </link>
+  <joint name="base_to_front_left_wheel" type="fixed">
+    <parent link="base_link"/>
+    <child link="front_left_wheel"/>
+    <origin xyz="0.108 0.113 0.048" rpy="0 0 0"/>
+  </joint>
+
+  <link name="front_right_wheel">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.048" length="0.042"/>
+      </geometry>
+      <material name="tyre_black"/>
+    </visual>
+  </link>
+  <joint name="base_to_front_right_wheel" type="fixed">
+    <parent link="base_link"/>
+    <child link="front_right_wheel"/>
+    <origin xyz="0.108 -0.113 0.048" rpy="0 0 0"/>
+  </joint>
+
+  <link name="rear_left_wheel">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.048" length="0.042"/>
+      </geometry>
+      <material name="tyre_black"/>
+    </visual>
+  </link>
+  <joint name="base_to_rear_left_wheel" type="fixed">
+    <parent link="base_link"/>
+    <child link="rear_left_wheel"/>
+    <origin xyz="-0.108 0.113 0.048" rpy="0 0 0"/>
+  </joint>
+
+  <link name="rear_right_wheel">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.048" length="0.042"/>
+      </geometry>
+      <material name="tyre_black"/>
+    </visual>
+  </link>
+  <joint name="base_to_rear_right_wheel" type="fixed">
+    <parent link="base_link"/>
+    <child link="rear_right_wheel"/>
+    <origin xyz="-0.108 -0.113 0.048" rpy="0 0 0"/>
+  </joint>
+
+  <!-- =================================================================
+       imu_link — the frame serial_bridge stamps on sensor_msgs/Imu.
+       THIS JOINT is what stops that frame from dangling. The offset is
+       where the IMU chip physically sits relative to base_link; get it
+       wrong and heading is still correct (yaw is unaffected by a pure
+       translation) but any future accel-based work is biased.
+
+       Mounted at the REAR of the car, on the chassis plate under the shell.
+       x = -0.100 puts it just behind the rear axle (which is at x = -0.108);
+       MEASURE this offset. y = 0 assumes it is centred across the plate.
+
+       rpy is zero, i.e. the board's axes are assumed aligned with the car's:
+       chip +x forward, +z up. If the board is rotated or inverted on its mount,
+       correct it HERE rather than adding an offset in code — that is exactly
+       the misalignment this joint exists to express.
+       ================================================================= -->
+  <link name="imu_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.020 0.020 0.005"/>
+      </geometry>
+      <material name="sensor_teal"/>
+    </visual>
+  </link>
+  <joint name="base_to_imu" type="fixed">
+    <parent link="base_link"/>
+    <child link="imu_link"/>
+    <origin xyz="-0.100 0 0.053" rpy="0 0 0"/>
+  </joint>
+
+  <!-- =================================================================
+       uwb_link — the DW3000 AoA anchor, front-mounted and facing forward
+       so its +/-60 deg cone is centred on the car's heading.
+
+       Nothing stamps this frame yet (tag/pose currently carries base_link),
+       but the anchor — not base_link — is the true origin of the bearing
+       and distance fix, so the frame exists ready for tag/pose to be
+       re-stamped onto it. The 0.170 m lever arm is small next to the
+       <10 cm ranging error, but it is not zero.
+       ================================================================= -->
+  <link name="uwb_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.010 0.060 0.030"/>
+      </geometry>
+      <material name="uwb_orange"/>
+    </visual>
+  </link>
+  <joint name="base_to_uwb" type="fixed">
+    <parent link="base_link"/>
+    <child link="uwb_link"/>
+    <origin xyz="0.150 0 0.135" rpy="0 0 0"/>
+  </joint>
+
+</robot>
