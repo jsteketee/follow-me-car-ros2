@@ -9,9 +9,15 @@ right now — the live counterpart to PROJECT_PLAN.md's durable specs.
 ## To Do
 
 ### Current focus
-Data path up is working (Phases 3–6 ✅). Next: **command path down** — setpoint cmd path +
-cmd-timeout failsafe on the ESP32, then a `NavigateToPose` action server and the Goal Pose
-click demo. See PROJECT_PLAN.md Phases 2 and 10 for detail.
+Data path up is working (Phases 3, 4 core, and 6 ✅ — the Phase 5 Pi fusion node is NOT
+built; the ESP32's onboard fusion covers it via `fused_*` telemetry for now).
+**Command path down ✅ 2026-07-13**: ESP32 accepts `target_speed` + `target_heading`
+frames with validation, `NavMode::REMOTE` (now the boot default, holding boot heading),
+and the cmd-timeout failsafe (revised: throttle-only; steering holds last heading) —
+bench-validated on the stand. Next: **update the serial bridge** for the changed frame
+(`cam_*` fields gone; `lax`, `cmd_speed`/`cmd_heading`/`cmd_age`, `throttle`/`steering`
+added), then a `NavigateToPose` action server and the Goal Pose click demo. See
+PROJECT_PLAN.md Phases 2 and 10 for detail.
 
 Design spec for the command-path phase (interface, failsafe, HAL transition) is drafted at
 [docs/hal-command-path.md](./docs/hal-command-path.md) — settled decisions fold back into
@@ -20,8 +26,36 @@ PROJECT_PLAN once implemented.
 ### Open issues 
 - Reverse is invisible — `odo` doesn't tick backwards, so dead reckoning freezes in reverse.
 - UWB only reliable to +/- 60 degrees. 
+- UWB bearing lags reality by ~0.3s (anchor-side smoothing, measured 2026-07-14) — Pi
+  should inflate bearing uncertainty while `pan_angle` is changing between frames; see
+  2026-07-14 build log for the deferred delayed-reporting mitigation.
+- No battery voltage sensing on the car — pack voltage can't be streamed or alarmed on;
+  hardware gap (noted 2026-07-13).
+- `lax` telemetry field: verify on the bench that the BNO085 x-axis really is forward/back
+  on this mounting, and note the sign convention for "forward".
+
+### Parked concerns (noted, deliberately ignored unless symptomatic)
+- **Tag/bearing lag is not latency-critical by architecture** (parked 2026-07-14): the car
+  never steers on the tag estimate directly — the steering PID closes on IMU compass yaw
+  (low-latency, onboard, 50 Hz); the tag estimate only moves the heading *setpoint*, and a
+  walking tag moves it slowly. This covers the ~0.3 s UWB anchor smoothing lag and any
+  Pi-side fusion/transport latency. Revisit only if following looks sluggish or overshoots
+  when the tag turns sharply — the symptom would be lag-shaped, not instability-shaped.
 
 ### Open questions
+- ~~Command-path numbers~~ **decided 2026-07-12**: 20 Hz re-send / 300 ms timeout, hybrid
+  resume — see PROJECT_PLAN "Command stream contract".
+- ~~Boot default is still `FOLLOW_ME`~~ **resolved 2026-07-13**: `DEFAULT_NAV_MODE` is now
+  REMOTE — a rebooted car waits at zero throttle holding its boot heading instead of
+  re-entering autonomy (FOLLOW_ME's onboard control block is commented out entirely). The
+  bridge's halt-TX-on-reboot behavior stays as hygiene.
+- Heading conversion: verify the ESP32 IMU yaw convention (direction of increase, zero
+  reference) against REP-103 yaw, and bench-verify the bridge's odom-frame → device-compass
+  conversion (offset derived from `imu/data` vs `odom`) before the first Pi-commanded drive.
+- ~~ESP32 wrapped-heading-error implementation~~ **verified 2026-07-13**: bench seam test
+  passed (yaw≈0, `target_heading:350` steered the short way).
+- (Deferred with the raw-actuator mode: steering sign convention + max steering angle
+  calibration — only needed if/when the loops migrate to the Pi.)
 
 ---
 
@@ -106,6 +140,69 @@ PROJECT_PLAN once implemented.
 ## Build Log
 
 What's been built, newest first. Release-notes style — one line per change. Gotchas at the bottom.
+
+### 2026-07-14
+- **ESP32 mode restructure: REMOTE / DIRECT / STOPPED** — the mode roster now matches the
+  HAL role. `DIRECT` implements the raw-actuator frames (`{"throttle":..,"steering":..}`,
+  validated: finite, throttle [0,1] no-reverse, steering [-1,1]; own 300 ms failsafe =
+  throttle cut + steering holds; `target_pan` accepted in any frame shape, so DIRECT
+  drives all three actuators). FOLLOW_ME / TEST / THROTTLE_TEST deleted (follow logic
+  readable at esp32 commit `075ab58`), **`nav.cpp`/`nav.h` eliminated** — control owns the
+  mode (`ControlMode`, `control_set_mode`/`control_mode`); dashboard buttons are now
+  Remote / Direct / Stopped and its target arrow reads control's held REMOTE heading.
+  Speed PID measure re-pointed from fusion's `fusedSpeedMph` to `rpm` directly →
+  control.cpp has no fusion dependency (prerequisite for the fusion strip). Bench note:
+  THROTTLE_TEST's slider is gone — bench throttle testing is now DIRECT mode + pasted
+  direct frames (car-quiet build); dashboard direct-sliders are a possible follow-up.
+- **Pan servo for the UWB anchor** (GPIO 6, driven by direct LEDC at 50Hz/14-bit — NOT
+  ESP32Servo: its S3 MCPWM path routes 3rd+ servos' GPIO to the wrong timer output, so the
+  pin silently carries another servo's waveform; bug at ESP32PWM.cpp:492).
+- **pan-cal env**: UWB-referenced calibration — 5-point least-squares fit of bearing vs
+  pulse width → `PAN_SERVO_US_PER_DEG` (≈−10.5, ~±65° travel at 800–2200µs endpoints) and
+  trim from the fit's bearing-zero. Measurement span is ±30% of travel so apparent bearings
+  stay inside the DW3000's linear zone (AOA response bends past ~±40°).
+- **Anchor angle latency measured** (pan-cal phase 4): the anchor firmware smooths its
+  angle output — ~0.3s effective latency, constant across pan rates. While the pan moves,
+  the reported bearing is stale by (pan rate × 0.3s); a moving average also *smears*
+  during motion, so prefer small discrete pan corrections over long sweeps. Deferred
+  mitigation: ESP32 reports pan_angle from 0.3s ago so bearing + pan_angle in one telemetry
+  frame describe the same instant (`PAN_REPORT_DELAY_MS` idea, not yet implemented — current
+  firmware reports the live slew-limited angle).
+- **HAL pan interface**: optional `target_pan` in the command frame (deg, 0 = car nose,
+  +right, ±90 validation; absent field = keep current target); firmware clamps targets to
+  a symmetric ±55° (`PAN_MAX_DEG`) so the Pi sees one limit both ways despite asymmetric
+  physical travel (~+69°/−64° at current trim); ESP32 slews at ~50°/s regardless of
+  commanded jump size; live `pan_angle` (deg, same convention) added to the telemetry
+  frame. Pan-aiming *policy* deliberately lives on the Pi; the tf tree corrects bearings
+  by `pan_angle`.
+
+### 2026-07-12 (later — supersedes the entry below)
+- **Decision revised: heading-setpoint interface** — command frame is now
+  `{"target_speed":<mph>,"target_heading":<compass deg>}`. Priority shifted to a minimal
+  ESP32 diff: the tuned steering PID stays onboard and only its error source swaps by mode
+  (FOLLOW_ME: tag-relative `fused_angle` → 0; Pi mode: wrapped `imu.yaw − target_heading`
+  → 0 — structurally identical, gains transfer). All fusion behavior stays in place.
+  Steering-as-direct-position survives as the reserved raw-actuator mode / eventual pure-HAL
+  end state. Command topic is now custom `cmd_drive` (`follow_me_interfaces/DriveCommand`:
+  header + speed m/s + heading rad in `odom` frame; bridge converts to device compass deg on
+  write) — `cmd_ackermann` superseded (Ackermann's `steering_angle` is a wheel angle, not a
+  heading). Gotchas recorded in open questions: odom↔device yaw offset, [-180,180] error wrap.
+
+### 2026-07-12
+- **Decision — steering commanded as direct normalized position [-1, 1]** *(superseded same
+  day — see entry above)*, replacing
+  PROJECT_PLAN's earlier `{"target_speed","target_angle"}` frame. Rationale: the ESP32
+  steering PID's measure is tag-relative `fused_angle`, so a bearing setpoint only means
+  anything while onboard fusion tracks the tag — unusable for teleop and for `NavigateToPose`
+  (no tag). The bearing regulator moves to the Pi as the Phase 8 controller (heading PID +
+  kinematic feedforward); the speed PID stays on the ESP32. A cascaded ESP32-side heading
+  controller was considered and rejected (thin-HAL inversion, no latency need, yaw-rate inner
+  loop has zero authority at v=0) — see the decision log in PROJECT_PLAN's Control Loop
+  Placement section.
+- Interim command topic changed to `cmd_ackermann` (`ackermann_msgs/AckermannDriveStamped`)
+  from `/cmd_vel` (`Twist`); thin Twist→Ackermann shim planned for stock teleop tools.
+- PROJECT_PLAN.md amended: Serial Protocol outgoing frame, Control Loop Placement (rewritten),
+  Phases 2/3/7/8, Key topics table. `serial_hal.cpp` header comment updated in the ESP32 repo.
 
 ### 2026-07-10
 - `tag_broadcaster.py`: subscribes `tag/pose`, broadcasts `uwb_link → tag_link` on `/tf` per fix (~10 Hz) — the DW3000 tag now shows as a moving TF frame.

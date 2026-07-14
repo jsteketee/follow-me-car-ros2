@@ -8,7 +8,7 @@ not their live status or change history (NOTES.md).
 
 ## Goals
 
-1. **Follow-me mode** — car autonomously follows the UWB tag (+ camera fusion), implemented as ROS2 nodes on the Pi.
+1. **Follow-me mode** — car autonomously follows the UWB tag, implemented as ROS2 nodes on the Pi.
 2. **Dead reckoning commanded nav** — send the car a heading + distance, or a sequence of waypoints; executed using IMU yaw + RPM odometry. No map or LIDAR required.
 3. **Nav2-compatible interfaces** — implement standard `nav2_msgs/NavigateToPose` and `nav2_msgs/FollowWaypoints` action servers. Compatible with Nav2 if a LIDAR/map is added later.
 4. **(Stretch) Web waypoint canvas** — custom browser UI (rosbridge + roslibjs) for dropping waypoints onto a map view. The same interaction exists in the standard stack first (RViz/Foxglove "Goal Pose" click → `NavigateToPose`), so this is later polish, not core.
@@ -20,12 +20,13 @@ not their live status or change history (NOTES.md).
 │         ESP32-S3 (HAL)           │ ◄────────────► │         Raspberry Pi 4B              │
 │                                  │                │                                      │
 │  UWB AoA (DW3000: dist+bearing)  │  sensor JSON → │  ros2_control hardware interface     │
-│  IMU (BNO085)                    │  ← cmd JSON    │  fusion node (bearing blend +        │
-│  Camera (OV2640 blob via I2C)    │                │    cogging detection candidate)      │
+│  IMU (BNO085)                    │  ← cmd JSON    │  fusion node (bearing filter +       │
+│                                  │                │    cogging detection candidate)      │
 │  RPM hall-effect sensor          │                │  dead reckoning pose estimator       │
-│  AS5600 encoder (cog detection)  │                │  follow-me controller (PID)          │
+│  AS5600 encoder (cog detection)  │                │  follow-me setpoint generator        │
 │  ESC + steering servo PWM        │                │  nav action servers                  │
-│  Serial framing + cmd-timeout    │                │  RViz/Foxglove visualization         │
+│  Speed + heading PID loops       │                │  RViz/Foxglove visualization         │
+│  Serial framing + cmd-timeout    │                │                                      │
 │    failsafe                      │                │                                      │
 └──────────────────────────────────┘                └──────────────────────────────────────┘
 ```
@@ -36,7 +37,7 @@ ESP32 repo: `follow-me-car-esp32`, branch `ros2-hal`.
 
 **Incoming from ESP32 (50 Hz target, newline-delimited JSON):**
 ```json
-{"ts":12345,"uwb_dist":183.2,"uwb_bearing":-12.4,"yaw":23.4,"pitch":0.1,"roll":-0.3,"speed":1.82,"odo":4821.3,"enc_speed":1.79,"cogging":0,"cam_found":1,"cam_x":0.23,"cam_y":0.11,"fused_angle":5.2,"fused_dist":185.0,"fused_unc":17.3}
+{"ts":12345,"uwb_dist":183.2,"uwb_bearing":-12.4,"yaw":23.4,"pitch":0.1,"roll":-0.3,"lax":0.12,"speed":1.82,"odo":4821.3,"enc_speed":1.79,"cogging":0,"fused_angle":5.2,"fused_dist":185.0,"fused_unc":17.3,"cmd_speed":1.80,"cmd_heading":214.5,"cmd_age":37,"throttle":0.31,"steering":-0.18}
 ```
 `ts` (ms) is the ESP32 device timestamp — Pi computes dt from device time, not arrival time.
 The bridge maps `ts` into the ROS clock via a constant offset captured on the first frame
@@ -55,40 +56,115 @@ downstream is SI by construction and needs no scale factors. Note `fused_unc` is
 positive) for Pi-side cogging detection; `cogging` is the ESP32 latching cogging flag (0/1).
 `fused_angle`/`fused_dist`/`fused_unc` are the ESP32's Kalman-fused bearing, distance, and
 bearing variance — streamed because Pi-side fusion comes later.
+`lax` is IMU linear acceleration along the sensor x-axis (forward/back, m/s², gravity removed;
+axis/sign pending bench verification). `cmd_speed`/`cmd_heading`/`cmd_age` echo the last
+**accepted** command frame and its age in ms (−1 = none since boot; age > 300 = cmd-timeout
+failsafe active) so the bridge can verify what the car is acting on and detect rejected frames.
+`throttle`/`steering` are the normalized [-1, 1] control outputs (post-PID, pre
+hardware-shaping) for logging, tuning, and eventual Pi-side system identification.
+(`cam_found`/`cam_x`/`cam_y` were removed 2026-07-13 with the camera module.)
 
-**Outgoing to ESP32 (on demand, newline-delimited JSON):**
+**Outgoing to ESP32 (newline-delimited JSON):**
 ```json
-{"target_speed":1.8,"target_angle":-12.4}
+{"target_speed":1.8,"target_heading":214.5}
 ```
-Setpoints feed the ESP32's existing tuned PID loops (see "Control Loop Placement" below). The
-protocol reserves a raw-actuator mode (`{"throttle":0.31,"steering":-0.18}`) for the
-later migration of the loops to the Pi. ESP32 applies a cmd-timeout failsafe: neutral
-throttle if no command arrives within the timeout.
+`target_speed` (mph) feeds the ESP32's existing tuned speed PID. `target_heading` is an
+**absolute compass heading in degrees, same convention as the telemetry `yaw` field** — the
+ESP32 steers to hold it using the existing tuned steering PID with its error source swapped
+from tag bearing to heading error (see "Control Loop Placement" below).
 
-## Control Loop Placement — setpoints first, migrate later
+Frame rule: ROS-side headings live in the `odom` frame (rad, REP-103), which
+`pose_estimator` zeroed with a captured yaw offset — so the bridge converts on write to
+device compass degrees, deriving the device-vs-odom yaw offset from streams it already
+handles (`imu/data` carries device yaw; `odom` carries odom yaw). Implementation note for
+the ESP32: heading error must be computed **wrapped to [-180, 180]** (the pattern exists in
+`fusion.cpp`'s innovation wrapping) — a naive `setpoint − measure` across the 0/360 seam
+commands a full spin.
 
-**Initially:** both PID loops (speed + steering) stay on the ESP32, already tuned
-and working. The Pi commands setpoints (`target_speed`, `target_angle`) — no control retuning
-needed. **Later:** migrate loops up to the Pi as the ros2_control
-custom-controller showcase; the cmd protocol's mode field makes that a config change, not a
-re-architecture.
+**Raw-actuator frames (implemented 2026-07-14, was "reserved"):**
+```json
+{"throttle":0.31,"steering":-0.18}
+```
+Normalized efforts, acted on in the ESP32's DIRECT mode (PIDs bypassed; actuator
+conditioning — deadband/scale/smoothing — still applies). Validation: reject the whole
+frame on non-finite values, `throttle` outside **[0, 1]** (no reverse for now — reverse is
+invisible to odometry), or `steering` outside **[-1, 1]**. DIRECT has its own 300 ms
+cmd-timeout failsafe: throttle cut, steering holds the last commanded position (same
+rationale as REMOTE's heading hold). The ESP32 always parses and stores both frame shapes
+into separate slots with separate timestamps; the current mode decides which one is acted
+on. This is also the migration path if the control loops ever move to the Pi.
 
-Latency reference (why either placement works): wire latency over USB-CDC is negligible
-(~1-2ms); the real terms are frame rate (20 Hz = up to 50ms staleness each way; 50 Hz is the
-target) and Linux scheduling jitter (~1-10ms, hurts PID derivative terms — mitigate by
-timestamping frames ESP32-side so the Pi computes dt from device time).
+**ESP32 control modes (restructured 2026-07-14 — the mode roster now matches the HAL
+role):** `REMOTE` (setpoint frames → onboard PIDs; the boot default), `DIRECT`
+(raw-actuator frames), `STOPPED` (kill switch, latches until a human re-arms). The old
+FOLLOW_ME / TEST / THROTTLE_TEST modes are gone, along with `nav.cpp` — control owns the
+mode. The dashboard `/mode` endpoint remains the sole mode authority.
+
+**Command stream contract (decided 2026-07-12):** the bridge re-sends the current absolute
+setpoint at a fixed **20 Hz** even when unchanged — the stream is the heartbeat, and
+idempotent absolute frames are why no acks/checksums are needed (USB-CDC has per-packet
+CRC). ESP32 failsafe (revised 2026-07-13): if no valid frame arrives for **300 ms**
+(~33 cm at 2.5 mph), **neutral throttle only** — steering stays active, holding the last
+commanded heading (centering the wheels mid-turn on a comms blip would make the car plow
+straight; the original both-axes-neutral design is superseded). Before any command has
+ever arrived, the held heading is the boot yaw, captured in `control_init()`. Resume
+semantics are hybrid: after a timeout trip the car stays in REMOTE and throttle
+auto-resumes on the next valid frame; an ESP32 reboot (bridge detects `ts` jumping
+backwards) still makes the bridge **halt TX and wait for a fresh command** — good hygiene,
+though no longer safety-critical since `DEFAULT_NAV_MODE` is now REMOTE (2026-07-13): a
+rebooted car waits at zero throttle holding its boot heading instead of re-entering
+autonomy. A dashboard STOPPED always latches until a human re-arms, and neutrals both
+axes (steering included). Frames of the wrong shape for the current mode are stored but
+not acted on; serial frames never change the mode (dashboard `/mode` is the mode
+authority).
+
+## Control Loop Placement — heading + speed setpoints, minimal ESP32 diff
+
+**Speed:** the tuned speed PID stays on the ESP32 — it's the one latency-sensitive loop
+(ESC deadband, cogging, stiction at low speed). The Pi commands `target_speed`; no control
+retuning needed. Optional later migration to the Pi via the raw-actuator mode, and only if
+Pi-side control performs — if it underperforms, the loop stays on the ESP32 permanently and
+that's fine.
+
+**Steering:** the tuned steering PID also stays on the ESP32 — only its **error source**
+changes with the nav mode. In standalone FOLLOW_ME it regulated the tag-relative
+`fused_angle` to zero. In REMOTE it regulates the wrapped heading error
+`(imu.yaw − target_heading)` to zero. The two are structurally identical — the
+tag-relative angle *is* a heading error (`yaw − bearing_to_tag`, wrapped) — so the tuned
+gains transferred directly and the firmware diff was a few lines in `control.cpp`'s mode
+switch. (2026-07-14: FOLLOW_ME is deleted from the firmware entirely — the Pi owns follow
+logic; its speed-interpolation code is readable at esp32 repo commit `075ab58`. UWB fusion
+behavior — bearing Kalman, distance dead reckoning, uncertainty tracking — stays in place
+untouched; the camera branch of fusion was removed with the camera module.)
+
+Decision log (2026-07-12, two revisions same day):
+- (a) Steering-as-direct-position on the wire was adopted first, then superseded by (b).
+  Direct position survives as the reserved raw-actuator mode and the eventual pure-HAL end
+  state.
+- (b) **Heading-setpoint interface** adopted to keep the phase-1 ESP32 change minimal: reuse
+  the tuned steering PID with a swapped error source instead of building a Pi-side steering
+  controller before anything drives. Accepted costs: heading-loop tuning iterates by
+  firmware reflash rather than Pi-side parameter change, and stick-style teleop maps
+  awkwardly onto heading commands (workable as heading-nudge). The raw-actuator mode is the
+  migration path if/when the loops move up.
+- A cascaded ESP32 heading controller (heading → yaw *rate* → servo) remains rejected — a
+  yaw-rate inner PID has speed-dependent plant gain (ω ≈ v·tan(δ)/L, zero authority at
+  v = 0). The adopted design is a single heading PID, no inner rate loop.
+
+Latency reference: wire latency over USB-CDC is negligible (~1-2ms); the real terms are
+command rate (20 Hz = up to 50ms setpoint staleness; telemetry already ships at 50 Hz) and
+Linux scheduling jitter (~1-10ms) — both comfortably irrelevant while the PIDs close on the
+ESP32 at 50 Hz and the Pi only moves setpoints.
 
 Permanent placement regardless of migration:
-- **Cmd-timeout failsafe** (neutral on serial loss) → ESP32, non-negotiable.
+- **Cmd-timeout failsafe** (neutral throttle on serial loss; steering holds the last
+  commanded heading — revised 2026-07-13) → ESP32, non-negotiable.
 - **Actuator conditioning** (deadband, trim, clamp, smoothing) → ESP32 (`actuators.cpp`).
 - **Cogging detection** → Pi fusion node (candidate; see Phase 5). If cogging *recovery*
   needs fast throttle intervention, that reflex may stay ESP32-side even with detection on
   the Pi.
-- **Steering PID** (migration order: first) — plant time constant 300ms+ at
-  2.5 mph; Pi-side latency is invisible.
-- **Speed PID** (migration order: second, and only if it performs) — the one latency-sensitive
-  loop (ESC deadband, cogging, stiction at low speed). If Pi-side control underperforms,
-  it stays on the ESP32 permanently and that's fine.
+- **Heading + speed PIDs** → ESP32 for now; migration to the Pi (via raw-actuator mode) is
+  optional, later, and only if it performs.
 
 ## Hardware
 
@@ -102,7 +178,7 @@ Main components only — power distribution and wiring not tracked here.
 | Hall-effect sensor | RPM / speed | ✅ |
 | AS5600 encoder (I2C) | cogging detection | ✅ installed & validated |
 | BNO085 IMU (I2C) | yaw for dead reckoning + fusion | ✅ |
-| OV2640 on XIAO ESP32-S3 (I2C) | blob camera (optional, later) | ⚠️ confirm status |
+| OV2640 on XIAO ESP32-S3 (I2C) | blob camera | ❌ removed from firmware 2026-07-13 — not planned (Mode 2's Pi-direct camera is a separate future decision) |
 | SSD1306 OLED | on-car display | ✅ |
 | Open-frame RC chassis + 2S LiPo | vehicle | ✅ |
 
@@ -133,35 +209,45 @@ work progresses. ✅ marks what's built (the single source for phase status).
 ### Phase 2 — ESP32 HAL firmware
 - Add `serial_hal.cpp` telemetry stream (50 Hz sensor JSON out) — strip nothing, standalone
   modes keep working
-- Accept setpoint commands (`target_speed`, `target_angle`) + cmd-timeout failsafe
-- Later: strip `fusion.cpp`, `nav.cpp`, `control.cpp` down to a pure HAL as the loops migrate
-  to the Pi
+- ✅ Accept command frames (`target_speed`, `target_heading`) + cmd-timeout failsafe — the
+  steering PID's error source swaps from tag bearing to wrapped heading error in the
+  Pi-commanded mode (built + bench-validated 2026-07-13: `NavMode::REMOTE`, non-blocking
+  RX parser with strict validation, boot-yaw heading hold, throttle-only failsafe).
+  Went further than "everything else stays as-is": `DEFAULT_NAV_MODE` is now REMOTE,
+  FOLLOW_ME's onboard control block is commented out, and the camera module was removed
+  from the firmware entirely
+- Later: strip `fusion.cpp`, `nav.cpp`, `control.cpp` down to a pure HAL as their Pi
+  replacements are proven. Ordering matters: `fusion.cpp` feeds the `fused_*` telemetry the
+  Pi consumes today, so it goes only after Phase 5 ships — and the speed PID currently reads
+  its measure through fusion's `Pose` struct (`fusedSpeedMph` is just RPM speed plumbed
+  through, control.cpp:108), so re-point it at `rpm` directly before stripping. The speed
+  PID itself may stay permanently
 - Keep WiFi + dashboard for side-by-side debugging during transition
 
 ### Phase 3 — ROS2 bridge node
 - Python node: read serial frames, publish raw sensor topics
 - Confirm data in `ros2 topic echo` and the visualizer
-- Also write setpoint commands from subscribed topic to serial
+- Also write command frames to serial from the subscribed command topic (`cmd_drive` —
+  see Key topics), converting odom-frame heading (rad) → device compass degrees on write
 
 ### Phase 4 — Custom interfaces package
 - `follow_me_interfaces`: `FusedTagPose.msg`
-- `UWBReading.msg` + `CameraBlob.msg` were **removed** to keep the surface minimal; both must
-  be **re-added for Phase 5** (they are the fusion node's inputs). Backups in the session
-  scratchpad; `src/` is untracked in git, so there is no `git show` restore path.
+- `UWBReading.msg` + `CameraBlob.msg` were **removed** to keep the surface minimal.
+  Backups in the session scratchpad; `src/` is untracked in git, so there is no `git show`
+  restore path.
   - `UWBReading.msg` (distance + bearing from DW3000 AoA) — raw UWB bearing + `valid` fix flag
-    are no longer published anywhere.
-  - `CameraBlob.msg` (blob found + normalized x/y) — camera hardware status is unconfirmed
-    anyway (see Hardware table).
+    are no longer published anywhere; must be **re-added for Phase 5** (fusion node input).
+  - `CameraBlob.msg` — moot as of 2026-07-13: the camera was removed from the firmware and
+    the `cam_*` telemetry fields no longer exist. Do not re-add.
 - `FollowMe.action`
 
 ### Phase 5 — Fusion node
-- DW3000 provides bearing directly — no trilateration needed. Fusion blends UWB bearing +
-  camera blob angle on absolute compass bearing (port the Kalman scheme from `fusion.cpp`),
-  and tracks uncertainty
+- DW3000 provides bearing directly — no trilateration needed. Fusion filters UWB bearing
+  on absolute compass bearing (port the Kalman scheme from `fusion.cpp`), and tracks
+  uncertainty (camera blob input dropped 2026-07-13 with the camera module)
 - Candidate: cogging detection moves here (compare commanded throttle vs encoder motion;
   gate speed/odometry while cogging)
-- Subscribes: `/uwb/reading`, `/imu/data`, `/camera/blob`
-  (**re-add `UWBReading.msg` + `CameraBlob.msg` first**)
+- Subscribes: `/uwb/reading`, `/imu/data` (**re-add `UWBReading.msg` first**)
 - Publishes: `/tag/pose` (`FusedTagPose`)
 
 ### Phase 6 — Dead reckoning pose estimator ✅
@@ -175,13 +261,18 @@ work progresses. ✅ marks what's built (the single source for phase status).
 - C++ `SystemInterface` plugin replaces Python bridge node
 - `read()`: parse serial frame → fill state interfaces
 - `write()`: serialize command interfaces → send to ESP32
-- Works with setpoint commands too (velocity command interface) — does not require the
-  loop migration
+- Command interfaces mirror the wire contract: velocity (traction → `target_speed`) + a
+  custom heading-setpoint interface; switches to the standard Ackermann layout
+  (velocity + position) if/when the loops migrate via the raw-actuator mode
 
 ### Phase 8 — Follow-me controller
-- ros2_control controller (or standalone node)
-- Steering PID first (`fused_angle` → steering), speed PID second and only if it performs
-- Ports the tuned gains from the ESP32's `control.cpp`
+- Standalone node (or ros2_control controller): a *setpoint generator* — both PIDs stay on
+  the ESP32, so no Pi-side control loop is needed for this phase
+- Heading: absolute tag bearing = `FusedTagPose.heading + angle` (the msg carries `heading`
+  for exactly this) → publish as the `cmd_drive` heading setpoint
+- Speed: distance-interpolated `target_speed` (port the min/max-speed-vs-distance logic
+  from the ESP32's `control.cpp` FOLLOW_ME case — deleted from the firmware 2026-07-14;
+  read it at esp32 repo commit `075ab58`, where it was last active)
 
 ### Phase 9 — Follow-me action server
 - `/follow_me` action: goal = start/stop, feedback = distance + angle + uncertainty, result = reason stopped
@@ -227,12 +318,18 @@ ros2 run follow_me_nodes serial_bridge
 |-------|------|-----------|
 | `/uwb/reading` | `follow_me_interfaces/UWBReading` | ESP32 → ROS2 *(removed; re-add in Phase 5)* |
 | `/imu/data` | `sensor_msgs/Imu` | ESP32 → ROS2 |
-| `/camera/blob` | `follow_me_interfaces/CameraBlob` | ESP32 → ROS2 *(removed; re-add in Phase 5)* |
 | `/tag/pose` | `follow_me_interfaces/FusedTagPose` | fusion node output (bearing/dist to tag) |
 | `/odom` | `nav_msgs/Odometry` | dead reckoning node output |
 | `/wheel/distance` | `std_msgs/Float32` | accumulated odometer reading, m |
 | `/wheel/speed` | `std_msgs/Float32` | hall-effect speed, m/s |
-| `/cmd_vel` | `geometry_msgs/Twist` | controller → hardware interface |
+| `/cmd_drive` | `follow_me_interfaces/DriveCommand` | controller/nav → bridge (later: hardware interface) |
+
+`/cmd_drive` is a custom stamped message — `{header, speed (m/s), heading (rad, odom
+frame)}` — because no standard message carries a heading setpoint: Twist's `angular.z` is a
+yaw *rate*, and Ackermann's `steering_angle` is a wheel angle, neither of which matches the
+wire contract (`target_heading`). The header stamp lets the bridge drop stale commands. The
+earlier `/cmd_vel` (Twist) and `/cmd_ackermann` plans are superseded; if the loops later
+migrate via the raw-actuator mode, Ackermann becomes the natural fit again.
 
 ### Actions
 | Action | Type | Description |
