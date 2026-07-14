@@ -23,6 +23,11 @@ Design spec for the command-path phase (interface, failsafe, HAL transition) is 
 [docs/hal-command-path.md](./docs/hal-command-path.md) — settled decisions fold back into
 PROJECT_PLAN once implemented.
 
+- **Capabilities announcement (todo)**: ESP32 declares hardware limits over serial (boot +
+  `{"get":"caps"}` + on rtConfig change): max_speed, pan_max_deg, pan_slew_dps,
+  cmd_timeout_ms, fw id. Pi discovers limits instead of duplicating config — duplication
+  can't work anyway since maxSpeedMph is dashboard-tunable at runtime.
+
 ### Pi reimplementation checklist (behaviors stripped from the ESP32 2026-07-13/14 that
 PROJECT_PLAN does not yet capture explicitly — fold into Phases 5/8 when building them)
 - **Stale-estimate throttle gating**: FOLLOW_ME only drove when fusion uncertainty was
