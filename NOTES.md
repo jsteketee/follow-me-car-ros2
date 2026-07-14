@@ -23,6 +23,33 @@ Design spec for the command-path phase (interface, failsafe, HAL transition) is 
 [docs/hal-command-path.md](./docs/hal-command-path.md) — settled decisions fold back into
 PROJECT_PLAN once implemented.
 
+### Pi reimplementation checklist (behaviors stripped from the ESP32 2026-07-13/14 that
+PROJECT_PLAN does not yet capture explicitly — fold into Phases 5/8 when building them)
+- **Stale-estimate throttle gating**: FOLLOW_ME only drove when fusion uncertainty was
+  below threshold. Pi rule: stop sending speed setpoints when `fused_unc` (later: own
+  fusion uncertainty) exceeds ~150 deg². Threshold + calibration notes ("steady state
+  ~17, erratic ~120") live only in esp32 `config.h` (`FUSION_STALE_UNCERTAINTY`).
+- **Tag-distance dead reckoning**: fusion.cpp decrements the Kalman distance by wheel
+  odometry between UWB fixes so distance stays live through ranging dropouts. Phase 5's
+  spec ("filter UWB bearing, track uncertainty") omits it — port it, or follow speed
+  degrades exactly when UWB gets flaky.
+- **Erratic-motion detector**: the innovation-variance EWMA beside the KF
+  (`_innovMean`/`_innovEwma`, alphas 0.4/0.15 in config.h) that inflates uncertainty when
+  readings scatter. Part of "port the Kalman scheme" but a distinct mechanism, easy to
+  miss — and it's what makes the gating rule above actually trip.
+- **Pan measurement model** (deferred from PROJECT_PLAN deliberately): with the pan mount,
+  absolute bearing = `yaw + pan_angle + uwb_bearing` (three values from one telemetry
+  frame, same `ts`); inflate measurement noise while `pan_angle` is changing; tf tree
+  `base_link → pan_mount → uwb_anchor` is the motivation for Pi-side fusion.
+- **Setpoint speed cap documentation**: the ESP32 rejects `target_speed >
+  rtConfig.maxSpeedMph` (2.5 default) — not documented in PROJECT_PLAN's setpoint-frame
+  section or the T2 brief (T2 only says clamp ≥ 0). Bridge should clamp to the cap.
+  (Rejects are now visible: `cmd_rejects` counter added to telemetry 2026-07-14.)
+- **Follow tunables migration**: `followDistanceCm`/`maxDistanceCm`/`minSpeedMph`/
+  `maxSpeedMph` become ROS params in the Phase 8 port (only `maxSpeedMph` still has an
+  onboard consumer — validation + PID normalization); the ESP32 dashboard follow-behavior
+  sliders are then dead UI to remove.
+
 ### Open issues 
 - Reverse is invisible — `odo` doesn't tick backwards, so dead reckoning freezes in reverse.
 - UWB only reliable to +/- 60 degrees. 
