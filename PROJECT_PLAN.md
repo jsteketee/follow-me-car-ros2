@@ -20,8 +20,8 @@ not their live status or change history (NOTES.md).
 │         ESP32-S3 (HAL)           │ ◄────────────► │         Raspberry Pi 4B              │
 │                                  │                │                                      │
 │  UWB AoA (DW3000: dist+bearing)  │  sensor JSON → │  ros2_control hardware interface     │
-│  IMU (BNO085)                    │  ← cmd JSON    │  fusion node (bearing filter +       │
-│                                  │                │    cogging detection candidate)      │
+│  IMU (BNO085)                    │  ← cmd JSON    │  fusion node (tag bearing filter)    │
+│                                  │                │                                      │
 │  RPM hall-effect sensor          │                │  dead reckoning pose estimator       │
 │  AS5600 encoder (cog detection)  │                │  follow-me setpoint generator        │
 │  ESC + steering servo PWM        │                │  nav action servers                  │
@@ -37,7 +37,7 @@ ESP32 repo: `follow-me-car-esp32`, branch `ros2-hal`.
 
 **Incoming from ESP32 (50 Hz target, newline-delimited JSON):**
 ```json
-{"ts":12345,"uwb_dist":183.2,"uwb_bearing":-12.4,"yaw":23.4,"pitch":0.1,"roll":-0.3,"lax":0.12,"speed":1.82,"odo":4821.3,"enc_speed":1.79,"cogging":0,"fused_angle":5.2,"fused_dist":185.0,"fused_unc":17.3,"cmd_speed":1.80,"cmd_heading":214.5,"cmd_age":37,"throttle":0.31,"steering":-0.18}
+{"ts":12345,"uwb_dist":183.2,"uwb_bearing":-12.4,"yaw":23.4,"yaw_rate":-8.20,"pitch":0.1,"roll":-0.3,"lax":0.12,"speed":1.82,"odo":4821.3,"enc_speed":1.79,"cogging":0,"mode":"SETPOINT","cmd_speed":1.80,"cmd_heading":214.5,"cmd_age":37,"throttle":0.31,"steering":-0.18}
 ```
 `ts` (ms) is the ESP32 device timestamp — Pi computes dt from device time, not arrival time.
 The bridge maps `ts` into the ROS clock via a constant offset captured on the first frame
@@ -53,11 +53,19 @@ everything to SI (REP-103: metres, m/s, radians) before publishing, so every ROS
 downstream is SI by construction and needs no scale factors. Note `fused_unc` is a *variance*
 (deg²), so it converts by the **square** of the degree→radian factor.
 `speed`/`odo` are hall-effect derived. `enc_speed` is AS5600 encoder EMA velocity (mph, forward
-positive) for Pi-side cogging detection; `cogging` is the ESP32 latching cogging flag (0/1).
-`fused_angle`/`fused_dist`/`fused_unc` are the ESP32's Kalman-fused bearing, distance, and
-bearing variance — streamed because Pi-side fusion comes later.
+positive) for offline cogging characterization and validating the onboard detector — runtime
+cogging detection stays on the ESP32 (see Permanent placement); `cogging` is its latching flag (0/1).
+`fused_angle`/`fused_dist`/`fused_unc` were **removed 2026-07-16** with the fusion strip —
+the ESP32 no longer estimates tag pose; the Pi consumes raw `uwb_*` until Phase 5 replaces
+the estimate (tunables + port checklist: NOTES.md "ESP32 fusion split").
 `lax` is IMU linear acceleration along the sensor x-axis (forward/back, m/s², gravity removed;
-axis/sign pending bench verification). `cmd_speed`/`cmd_heading`/`cmd_age` echo the last
+axis/sign pending bench verification). `yaw_rate` (deg/s, added 2026-07-16) is the first
+difference of consecutive rotation-vector yaws at ~100 Hz — for Pi-side trust gating of UWB
+bearing measurements during rotation; sign matches the direction `yaw` increases.
+`mode` (added 2026-07-16) is the active control mode — `"SETPOINT"`, `"DIRECT"`, or `"STOPPED"`.
+The dashboard is the sole mode authority (serial frames never change it), so the bridge should
+surface mode and warn when it is streaming command frames the current mode will not act on.
+`cmd_speed`/`cmd_heading`/`cmd_age` echo the last
 **accepted** command frame and its age in ms (−1 = none since boot; age > 300 = cmd-timeout
 failsafe active) so the bridge can verify what the car is acting on and detect rejected frames.
 `throttle`/`steering` are the normalized [-1, 1] control outputs (post-PID, pre
@@ -160,9 +168,14 @@ Permanent placement regardless of migration:
 - **Cmd-timeout failsafe** (neutral throttle on serial loss; steering holds the last
   commanded heading — revised 2026-07-13) → ESP32, non-negotiable.
 - **Actuator conditioning** (deadband, trim, clamp, smoothing) → ESP32 (`actuators.cpp`).
-- **Cogging detection** → Pi fusion node (candidate; see Phase 5). If cogging *recovery*
-  needs fast throttle intervention, that reflex may stay ESP32-side even with detection on
-  the Pi.
+- **Speed estimation + cogging detection** → ESP32, non-negotiable (decision 2026-07-16,
+  reversing the earlier "Pi fusion node candidate"). Cogging is *fused into the speed
+  estimate* — rpm.cpp forces `speedMph` to 0 while cogging is latched — so the detector sits
+  inside the throttle PID's measurement path and shares its latency requirements (a false
+  positive reads as zero speed and winds the throttle up). It also gates odometry
+  accumulation, which must happen where odometry is integrated. The Pi's role is offline
+  only: characterize cogging from `enc_speed`/`speed`/`throttle` captures and validate/tune
+  the `RPM_COGGING_*` thresholds — never runtime detection.
 - **Heading + speed PIDs** → ESP32 for now; migration to the Pi (via raw-actuator mode) is
   optional, later, and only if it performs.
 
@@ -216,12 +229,12 @@ work progresses. ✅ marks what's built (the single source for phase status).
   Went further than "everything else stays as-is": `DEFAULT_NAV_MODE` is now REMOTE,
   FOLLOW_ME's onboard control block is commented out, and the camera module was removed
   from the firmware entirely
-- Later: strip `fusion.cpp`, `nav.cpp`, `control.cpp` down to a pure HAL as their Pi
-  replacements are proven. Ordering matters: `fusion.cpp` feeds the `fused_*` telemetry the
-  Pi consumes today, so it goes only after Phase 5 ships — and the speed PID currently reads
-  its measure through fusion's `Pose` struct (`fusedSpeedMph` is just RPM speed plumbed
-  through, control.cpp:108), so re-point it at `rpm` directly before stripping. The speed
-  PID itself may stay permanently
+- `fusion.cpp` **stripped 2026-07-16** — ahead of Phase 5 by explicit decision: nothing
+  consumed the estimate yet, and strip-first forces the Pi port instead of letting the
+  onboard stopgap linger. `fused_*` telemetry, the fusion/UWB-Kalman rtConfig tunables, and
+  the dashboard Fusion sliders went with it; OLED/dashboard readouts now show raw `uwb_*`.
+  Tunables + port checklist preserved in NOTES.md "ESP32 fusion split". The speed and
+  steering PIDs stay onboard permanently (see Permanent placement)
 - Keep WiFi + dashboard for side-by-side debugging during transition
 
 ### Phase 3 — ROS2 bridge node
@@ -245,8 +258,9 @@ work progresses. ✅ marks what's built (the single source for phase status).
 - DW3000 provides bearing directly — no trilateration needed. Fusion filters UWB bearing
   on absolute compass bearing (port the Kalman scheme from `fusion.cpp`), and tracks
   uncertainty (camera blob input dropped 2026-07-13 with the camera module)
-- Candidate: cogging detection moves here (compare commanded throttle vs encoder motion;
-  gate speed/odometry while cogging)
+- Cogging detection does NOT move here (decision 2026-07-16 — it is fused into the ESP32
+  speed estimate feeding the throttle PID; see Permanent placement). This node may consume
+  the `cogging` flag for behavioral decisions and `enc_speed` for offline threshold tuning.
 - Subscribes: `/uwb/reading`, `/imu/data` (**re-add `UWBReading.msg` first**)
 - Publishes: `/tag/pose` (`FusedTagPose`)
 
