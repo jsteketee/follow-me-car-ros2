@@ -8,7 +8,7 @@ Commands that work today for building, running, and inspecting the stack. Add to
 
 ### From scratch (fresh clone / clean checkout)
 ```bash
-rm -rf build install log               # needed when .msg is renamed
+rm -rf build install log               # needed when the .msg set changes (add/rename/remove)
 colcon build --symlink-install         # builds both packages in dependency order
 source install/setup.bash              # overlay: makes our packages + msgs visible to this shell
 ```
@@ -19,8 +19,10 @@ source install/setup.bash              # overlay: makes our packages + msgs visi
 ### Run
 ```bash
 # Whole stack: robot_state_publisher + serial_bridge + pose_estimator + foxglove_bridge
-ros2 launch follow_me_nodes bringup.launch.py namespace:=fmbot    # -> /fmbot/tag/pose
+ros2 launch follow_me_nodes bringup.launch.py 
+ros2 launch follow_me_nodes bringup.launch.py namespace:=fmbot    
 ros2 launch follow_me_nodes bringup.launch.py foxglove:=false     # bridge already running
+ros2 launch follow_me_nodes bringup.launch.py follow:=true        # also start nav_controller (DRIVES THE CAR)
 ```
 
 ```bash
@@ -29,30 +31,30 @@ ros2 launch foxglove_bridge foxglove_bridge_launch.xml
 # Python edits (serial_bridge.py): symlinked by --symlink-install -> NO rebuild, just re-run
 ros2 run follow_me_nodes serial_bridge                       
 ros2 run follow_me_nodes pose_estimator                      # separate terminal
-ros2 run follow_me_nodes serial_bridge --ros-args -r __ns:=/fmbot      # -> /fmbot/tag/pose
+ros2 run follow_me_nodes serial_bridge --ros-args -r __ns:=/fmbot      # -> /fmbot/uwb/raw
+
+# Follow controller (fused/tag_pose + odom -> cmd_drive, broadcasts nav_goal). DRIVES THE CAR.
+# In bringup behind follow:=true (default off); or run by hand — but MATCH THE NAMESPACE (-r __ns:=/fmbot)
+# or its topics won't connect to the /fmbot stack. New entry point => needs a colcon build once.
+ros2 run follow_me_nodes nav_controller --ros-args -r __ns:=/fmbot
+ros2 run follow_me_nodes nav_controller --ros-args -r __ns:=/fmbot -p cruise_speed_mps:=1.34
 ```
 
-## URDF / robot model
+### Test
 ```bash
-check_urdf install/follow_me_nodes/share/follow_me_nodes/urdf/follow_me_car.urdf  # parse + print tree
-ros2 topic echo /robot_description --once        # latched; empty output = RSP never parsed it
-ros2 topic echo /tf_static --once                # the URDF's fixed joints
-ros2 run tf2_tools view_frames        # generates frames.gv — cat it for a text edge list
-ros2 topic echo /tf_static --once     # the static edges (parent→child pairs)
-ros2 topic echo /tf                    # the moving edges, streaming
+# Node unit tests (no hardware). Needs the workspace sourced for the msg imports.
+source install/setup.bash
+python3 -m pytest src/follow_me_nodes/test/ -v
+python3 -m pytest src/follow_me_nodes/test/test_serial_bridge_tx.py -v   # just the TX-path tests
 ```
-
-**Rendering the car in Foxglove:** 3D panel → panel settings → *Custom layers* → *Add URDF*
-→ set source to **Topic** → `/robot_description`. Set the panel's *Display frame* to `odom`
-so the car drives across a fixed world instead of sitting still at the origin.
-
-
 
 ## ROS2 inspection
 ```bash
 ros2 topic list
 ros2 topic echo /imu/data
 ros2 topic echo --once /imu/data       # one message then exit
+ros2 topic echo /wheel/state           # inspect a topic's live contents (all fields)
+ros2 topic echo /wheel/state --field speed   # just one field's value, streaming
 ros2 topic hz /imu/data                # checkpoint: ~50 Hz (real hardware: ~44 Hz)
 ros2 node list
 ros2 pkg executables follow_me_nodes
@@ -60,15 +62,15 @@ ros2 pkg executables follow_me_nodes
 
 ### Inspecting message types
 ```bash
-ros2 topic type /wheel/distance              # what type is this topic?  -> std_msgs/msg/Float32
-ros2 topic info /wheel/distance              # type + publisher/subscriber counts
-ros2 topic info /wheel/distance --verbose    # + full QoS profile per endpoint
+ros2 topic type /wheel/state                 # what type is this topic?  -> follow_me_interfaces/msg/WheelState
+ros2 topic info /wheel/state                 # type + publisher/subscriber counts
+ros2 topic info /wheel/state --verbose       # + full QoS profile per endpoint
 ros2 run tf2_tools view_frames               # writes a PDF of the current TF tree
 ros2 run tf2_ros tf2_echo odom base_link     # live transform between two frames
 ros2 topic echo /tf                          # raw transform stream
 
 ros2 interface show std_msgs/msg/Float32     # the definition (note the `msg/` in the path)
-ros2 interface show follow_me_interfaces/msg/FusedTagPose
+ros2 interface show follow_me_interfaces/msg/UwbRaw
 ros2 interface list                          # every interface visible in this environment
 ros2 interface proto sensor_msgs/msg/Imu     # blank template, handy for `ros2 topic pub`
 ```
@@ -78,7 +80,8 @@ ros2 interface proto sensor_msgs/msg/Imu     # blank template, handy for `ros2 t
 ```bash
 # Record RAW sensor topics only. /odom and /tf get regenerated by the estimator on replay,
 # so replaying exercises the real code instead of a recording of its output.
-ros2 bag record -o run1 /imu/data /wheel/distance /wheel/speed /tag/pose
+ros2 bag record -o run1 /imu/data /wheel/state \
+  /command/status /actuator/status /uwb/raw /joint_states
 
 ros2 bag record -a -o run1             # everything, incl. /odom + /tf
 ros2 bag info run1
@@ -102,18 +105,29 @@ ls /dev/ttyUSB* /dev/ttyACM*           # find the ESP32
 pio run -e dw3000-test                 # build/flash a PlatformIO env
 pio device monitor                     # serial monitor
 ```
+## Pi (host)
+```bash
+sudo shutdown -h now       # graceful power-off (stops services, unmounts SD) — same as `sudo poweroff`
+sudo shutdown -h +5        # power off in 5 min; `sudo shutdown -c` cancels a pending one
+sudo reboot                # graceful restart
+```
+> Wait for the green ACT LED to stop blinking before pulling power — the command returns
+> before the write cache flushes, and early power-cut is the usual cause of SD-card corruption.
+
 ## Architecture
 ### Nodes
 ```
 src/follow_me_nodes/follow_me_nodes/serial_bridge.py    # parses esp32 json and publishes
 src/follow_me_nodes/follow_me_nodes/pose_estimator.py   # imu heading + wheel odom -> 2D pose
-src/follow_me_nodes/follow_me_nodes/tag_broadcaster.py  # tag/pose bearing+dist -> uwb_link->tag_link tf
+src/follow_me_nodes/follow_me_nodes/tag_broadcaster.py  # uwb/raw bearing+dist -> uwb_link->tag_link tf
+src/follow_me_nodes/follow_me_nodes/tag_estimator.py    # EKF: uwb/raw+pan+odom -> fused/tag_pose
+src/follow_me_nodes/follow_me_nodes/nav_controller.py   # latched-goal follow-me: tag+odom -> cmd_drive, nav_goal
 ```
 
 ### Description / launch
 ```
 src/follow_me_nodes/urdf/follow_me_car.urdf     # Traxxas 1/16 E-Revo, box+cylinder primitives
-src/follow_me_nodes/launch/bringup.launch.py    # RSP + serial_bridge + pose_estimator + tag_broadcaster + foxglove
+src/follow_me_nodes/launch/bringup.launch.py    # RSP + serial_bridge + pose_estimator + tag_broadcaster + tag_estimator + foxglove; + nav_controller when follow:=true (default off)
 ```
 
 ### TF tree
@@ -122,13 +136,18 @@ odom -> base_link          pose_estimator, /tf, per IMU frame (~50 Hz)
 base_link -> imu_link      robot_state_publisher, /tf_static, from the URDF
 base_link -> uwb_link      robot_state_publisher, /tf_static, from the URDF
 uwb_link -> tag_link       tag_broadcaster, /tf, per tag fix (~10 Hz); skipped when no fix
+base_link -> tag_est_link  tag_estimator, /tf, 20 Hz filtered tag (the dashboard's tag dot)
+odom -> nav_goal           nav_controller, /tf, 20 Hz committed follow goal (only when running)
 base_link -> {chassis,body,4x wheel}_link   robot_state_publisher, /tf_static
 ```
 
 ### Custom Messages
 ```
-src/follow_me_interfaces/msg/FusedTagPose.msg
-
+src/follow_me_interfaces/msg/ActuatorStatus.msg   # live actuator outputs: throttle/steering/pan
+src/follow_me_interfaces/msg/CommandStatus.msg    # control mode + last accepted command echo
+src/follow_me_interfaces/msg/DriveCommand.msg     # drive setpoint: speed + heading
+src/follow_me_interfaces/msg/UwbRaw.msg           # DW3000 range/bearing to tag
+src/follow_me_interfaces/msg/WheelState.msg       # fused speed, odometer distance, cogging flag
 ```
 
 ### Docs (source of truth)
@@ -144,3 +163,17 @@ cheat.md          # this file — commands.
 self.create_publisher(Imu, "imu/data", 10)                      # type, topic, qos depth
 self.create_subscription(Imu, "imu/data", self._on_imu, 10)     # type, topic, callback, qos depth
 ```
+
+## URDF / robot model
+```bash
+check_urdf install/follow_me_nodes/share/follow_me_nodes/urdf/follow_me_car.urdf  # parse + print tree
+ros2 topic echo /robot_description --once        # latched; empty output = RSP never parsed it
+ros2 topic echo /tf_static --once                # the URDF's fixed joints
+ros2 run tf2_tools view_frames        # generates frames.gv — cat it for a text edge list
+ros2 topic echo /tf_static --once     # the static edges (parent→child pairs)
+ros2 topic echo /tf                    # the moving edges, streaming
+```
+
+**Rendering the car in Foxglove:** 3D panel → panel settings → *Custom layers* → *Add URDF*
+→ set source to **Topic** → `/robot_description`. Set the panel's *Display frame* to `odom`
+so the car drives across a fixed world instead of sitting still at the origin.

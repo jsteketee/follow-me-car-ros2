@@ -9,19 +9,23 @@ right now — the live counterpart to PROJECT_PLAN.md's durable specs.
 ## To Do
 
 ### Current focus
-Data path up is working (Phases 3, 4 core, and 6 ✅ — the Phase 5 Pi fusion node is NOT
-built; the ESP32's onboard fusion covers it via `fused_*` telemetry for now).
+Data path up is working (Phases 3, 4 core, and 6 ✅). The Phase 5 Pi fusion node is NOT
+built — and as of 2026-07-16 the ESP32's tag Kalman is deleted too, so the wire carries
+raw `uwb_*` only: raw fixes drive `tag_link` directly until Phase 5 provides filtering.
 **Command path down ✅ 2026-07-13**: ESP32 accepts `target_speed` + `target_heading`
-frames with validation, `NavMode::REMOTE` (now the boot default, holding boot heading),
-and the cmd-timeout failsafe (revised: throttle-only; steering holds last heading) —
-bench-validated on the stand. Next: **update the serial bridge** for the changed frame
-(`cam_*` fields gone; `lax`, `cmd_speed`/`cmd_heading`/`cmd_age`, `throttle`/`steering`
-added), then a `NavigateToPose` action server and the Goal Pose click demo. See
-PROJECT_PLAN.md Phases 2 and 10 for detail.
+frames with validation, `SETPOINT` mode (the boot default, holding boot heading; named
+`REMOTE` until 2026-07-16), and the cmd-timeout failsafe (revised: throttle-only;
+steering holds last heading) — bench-validated on the stand. Bridge updated 2026-07-16
+to the slimmed telemetry frame (full schema in PROJECT_PLAN "Serial Protocol").
+A reactive follow-me controller (`nav_controller`) now closes the loop: fused tag ->
+`cmd_drive` -> car (first cut of Phase 8, 2026-07-17). Next layers: confidence gating +
+the ±60° recovery behavior, then the `/follow_me` action and the `NavigateToPose` /
+waypoint action servers. See PROJECT_PLAN.md Phases 8-10.
 
-Design spec for the command-path phase (interface, failsafe, HAL transition) is drafted at
-[docs/hal-command-path.md](./docs/hal-command-path.md) — settled decisions fold back into
-PROJECT_PLAN once implemented.
+(The command-path design spec `docs/hal-command-path.md` was deleted 2026-07-14: the phase
+is implemented and its settled decisions were folded into PROJECT_PLAN's Serial Protocol
+section, which supersedes the draft on every point where they differed — `target_heading`
+naming, throttle-only failsafe, REMOTE/DIRECT/STOPPED modes, echo-field set.)
 
 - **Capabilities announcement (todo)**: ESP32 declares hardware limits over serial (boot +
   `{"get":"caps"}` + on rtConfig change): max_speed, pan_max_deg, pan_slew_dps,
@@ -31,25 +35,28 @@ PROJECT_PLAN once implemented.
 ### Pi reimplementation checklist (behaviors stripped from the ESP32 2026-07-13/14 that
 PROJECT_PLAN does not yet capture explicitly — fold into Phases 5/8 when building them)
 - **Stale-estimate throttle gating**: FOLLOW_ME only drove when fusion uncertainty was
-  below threshold. Pi rule: stop sending speed setpoints when `fused_unc` (later: own
-  fusion uncertainty) exceeds ~150 deg². Threshold + calibration notes ("steady state
-  ~17, erratic ~120") live only in esp32 `config.h` (`FUSION_STALE_UNCERTAINTY`).
-- **Tag-distance dead reckoning**: fusion.cpp decrements the Kalman distance by wheel
-  odometry between UWB fixes so distance stays live through ranging dropouts. Phase 5's
-  spec ("filter UWB bearing, track uncertainty") omits it — port it, or follow speed
-  degrades exactly when UWB gets flaky.
+  below threshold. Pi rule: stop sending speed setpoints when the Phase 5 fusion's own
+  uncertainty exceeds ~150 deg² (`fused_unc` left the wire 2026-07-16, so there is NO
+  gating signal until Phase 5 ships — interim follow logic should gate on `uwb_age`
+  instead). Threshold + calibration notes ("steady state ~17, erratic ~120") live only
+  in esp32 `config.h` history (`FUSION_STALE_UNCERTAINTY`).
+- **Tag-distance dead reckoning**: the (now-deleted) fusion.cpp decremented the Kalman
+  distance by wheel odometry between UWB fixes so distance stayed live through ranging
+  dropouts. Phase 5's spec ("filter UWB bearing, track uncertainty") omits it — port it
+  from esp32 repo history, or follow speed degrades exactly when UWB gets flaky.
 - **Erratic-motion detector**: the innovation-variance EWMA beside the KF
-  (`_innovMean`/`_innovEwma`, alphas 0.4/0.15 in config.h) that inflates uncertainty when
-  readings scatter. Part of "port the Kalman scheme" but a distinct mechanism, easy to
-  miss — and it's what makes the gating rule above actually trip.
+  (`_innovMean`/`_innovEwma`, alphas 0.4/0.15 in config.h, both in esp32 repo history)
+  that inflated uncertainty when readings scattered. Part of "port the Kalman scheme"
+  but a distinct mechanism, easy to miss — and it's what makes the gating rule above
+  actually trip.
 - **Pan measurement model** (deferred from PROJECT_PLAN deliberately): with the pan mount,
   absolute bearing = `yaw + pan_angle + uwb_bearing` (three values from one telemetry
   frame, same `ts`); inflate measurement noise while `pan_angle` is changing; tf tree
   `base_link → pan_mount → uwb_anchor` is the motivation for Pi-side fusion.
-- **Setpoint speed cap documentation**: the ESP32 rejects `target_speed >
-  rtConfig.maxSpeedMph` (2.5 default) — not documented in PROJECT_PLAN's setpoint-frame
-  section or the T2 brief (T2 only says clamp ≥ 0). Bridge should clamp to the cap.
-  (Rejects are now visible: `cmd_rejects` counter added to telemetry 2026-07-14.)
+- ~~Setpoint speed cap documentation~~ **resolved 2026-07-14**: now documented in
+  PROJECT_PLAN's setpoint-frame validation note and in the T2 brief. Speed gating lives on
+  the ESP32 alone; the Pi-side clamp and `max_speed_mph` param were removed 2026-07-17.
+  Rejects are visible via the `cmd_rejects` telemetry counter.
 - **Follow tunables migration**: `followDistanceCm`/`maxDistanceCm`/`minSpeedMph`/
   `maxSpeedMph` become ROS params in the Phase 8 port (only `maxSpeedMph` still has an
   onboard consumer — validation + PID normalization); the ESP32 dashboard follow-behavior
@@ -81,9 +88,16 @@ PROJECT_PLAN does not yet capture explicitly — fold into Phases 5/8 when build
   REMOTE — a rebooted car waits at zero throttle holding its boot heading instead of
   re-entering autonomy (FOLLOW_ME's onboard control block is commented out entirely). The
   bridge's halt-TX-on-reboot behavior stays as hygiene.
+- ~~`wheel/state` hall staleness~~ **moot 2026-07-16**: the wire no longer exposes the
+  raw hall value — `speed` is the ESP32's fused estimate and no Pi-side speed fusion is
+  planned, so per-sensor staleness is the ESP32's problem.
 - Heading conversion: verify the ESP32 IMU yaw convention (direction of increase, zero
   reference) against REP-103 yaw, and bench-verify the bridge's odom-frame → device-compass
   conversion (offset derived from `imu/data` vs `odom`) before the first Pi-commanded drive.
+- ~~`fused_angle` frame ambiguity~~ **moot 2026-07-16**: `fused_angle` left the wire with
+  the ESP32 tag Kalman. Raw is settled (anchor-relative, spec formula: absolute =
+  yaw + pan_angle + uwb_bearing). The ambiguity lesson carries to Phase 5: define the
+  fusion output's frame explicitly, including the pan term.
 - ~~ESP32 wrapped-heading-error implementation~~ **verified 2026-07-13**: bench seam test
   passed (yaw≈0, `target_heading:350` steered the short way).
 - (Deferred with the raw-actuator mode: steering sign convention + max steering angle
@@ -169,9 +183,141 @@ PROJECT_PLAN does not yet capture explicitly — fold into Phases 5/8 when build
 
 ---
 
+## Code Rationale & Gotchas (relocated from inline comments)
+
+Non-obvious "why" pulled out of code comments (2026-07-17) when the comment rule tightened to
+description-only. The code keeps one-line pointers back here.
+
+**serial_bridge.py**
+- *Topic map* (all names RELATIVE; namespace set at launch, e.g. `fmbot` → `/fmbot/imu/data`,
+  which is what makes multi-robot work without touching source). Publishes: `imu/data`
+  (orientation, yaw rate, forward accel), `wheel/state` (fused speed, odometer, cogging),
+  `command/status` (mode + last-accepted cmd echo), `actuator/status` (throttle/steering/pan),
+  `uwb/raw` (DW3000 range/bearing; stays un-processed on the Pi — Phase-5 estimator consumes it),
+  `joint_states` (pan servo → `base_link→uwb_link` TF; steer joints cosmetic). Subscribes:
+  `cmd_drive` (latched, re-sent 20 Hz), `odom` (feeds heading offset). *(May fit PROJECT_PLAN better.)*
+- Header stamps = ESP32 device time mapped to the ROS clock; the offset cancels in subtraction so
+  `dt` stays exact device time while tf2 still accepts the stamps. Raw device uptime would stamp in
+  1970 and tf2 would drop the frames.
+- `_open_port`: `write_timeout` is mandatory — a wedged port must fail the write fast rather than
+  block the executor thread that drives the 20 Hz TX timer.
+- `_read_loop`: publishes the live handle to `self._ser` under the lock so the TX timer writes the
+  same port; clears it to `None` on disconnect so a TX tick in a reconnect gap drops.
+- Wheel/state is published BEFORE imu/data deliberately: pose_estimator's IMU callback samples its
+  cached wheel reading, so wheel-first keeps that cache same-frame instead of ~20 ms stale.
+- IMU: orientation available but covariance unknown → zeros; `covariance[0]` flips −1→0 (available,
+  variance unknown). `yaw_rate` converts UNNEGATED (matches the yaw treatment, so orientation+rate
+  stay consistent). `lax` is forward-axis accel (BNO085 x).
+- Pan joint NEGATED: wire `pan_angle` is +right (CW), a TF rotation about +z is +left (CCW).
+  Modeling pan here means raw/fused bearings compose to the tag's absolute position through the TF
+  tree with no separate pan term downstream.
+- Device-yaw pairing: map the time OUTSIDE `_tx_lock` — `_device_ts_to_ros_ns` itself takes
+  `_tx_lock` on a reboot frame, and the plain `Lock` is not reentrant.
+- Zero-stamp rule (documented deviation from the umbrella brief): `ros2 topic pub` leaves
+  `header.stamp` at 0, which reads as infinitely stale and blocks all bring-up. Treat a zero stamp
+  as arrival time; otherwise honor the sender's stamp so genuine staleness still gates TX.
+- Heading-offset (`_on_odom`): inbound imu/data uses device yaw UNMODIFIED; pose_estimator captures
+  `_yaw_offset` = first `ros_yaw` and publishes `odom θ = normalize(ros_yaw − _yaw_offset)`.
+  Inverting: `offset_deg = wrap_pm180(device_yaw_deg − degrees(odom_yaw))`, then
+  `target_heading = wrap_0_360(degrees(cmd.heading) + offset_deg)` (PLUS sign). EMA runs on the
+  WRAPPED delta so it survives the 0/360 seam.
+
+**pose_estimator.py**
+- Odometer is cached by the IMU callback; both come from the same serial frame, and the bridge
+  publishes wheel before imu, so the sample is same-frame.
+- Negative odometer delta = ESP32 reboot (the odometer only ticks up): re-baseline rather than
+  teleporting the car backwards.
+- Project the distance delta along the MIDPOINT heading (the car traced an arc over the step);
+  using either endpoint biases every turn to one side.
+
+**tag_broadcaster.py**
+- Broadcast from `uwb_link` (the anchor), NOT `base_link`: the ~0.09 m lever arm is small vs the
+  <10 cm ranging error but not zero, and parenting under `uwb_link` keeps the geometry honest AND
+  gets the tag's absolute position for free (tf2 chains `odom→base_link→uwb_link→tag_link` live; a
+  viewer in `odom` shows the true spot with no dead-reckoning drift baked into a stored edge).
+- Projection is in the anchor's OWN frame, so it needs no rotation offset: `x=d·cos(angle)`,
+  `y=d·sin(angle)` (angle 0 = ahead, +left per REP-103). The anchor rides the pan servo, so
+  `base_link→uwb_link` is a revolute joint from serial_bridge's `/joint_states`; the pan is applied
+  UPSTREAM and this node stays oblivious — `uwb_link→tag_link` is identical panned or not.
+- No-fix (`distance ≤ 0`; ESP32 sends −1) is skipped rather than planting a phantom tag at/behind
+  the origin.
+
+**tag_estimator.py**
+- Dedup by measurement time (`stamp − age`): the bridge re-reports each ~10 Hz fix on every ~50 Hz
+  telemetry frame with growing `age_ms`; without dedup the same fix would fuse ~5×.
+
+**bringup.launch.py**
+- `DEFAULT_PORT` is imported from the bridge node so the launch and node defaults stay in sync —
+  the exact mismatch that produced a silent Errno-2.
+- robot_state_publisher needs the URDF *contents*, not a path — hand it a path and it silently
+  fails to parse, publishing no `/tf_static` (imu_link dangles).
+- rsp deliberately does NOT publish `odom→base_link`: that edge is pose_estimator's, and two
+  publishers on one edge fight.
+
+**tests**
+- `test_serial_bridge_tx`: FakeSerial is injected via `_open_port` (monkeypatched at class level,
+  since the reader thread opens the port inside `__init__`); do NOT use pyserial's `loop://`, whose
+  loopback would feed our own TX frames back into the reader. Determinism = calling `_tx_tick`
+  directly; only the first test does a short real spin to prove the 20 Hz stream.
+- `test_tag_estimator`: pure callback math — determinism from calling callbacks + publish tick
+  directly with hand-built messages, publisher replaced with a recording stub, fix stamps from the
+  node clock.
+
+---
+
 ## Build Log
 
 What's been built, newest first. Release-notes style — one line per change. Gotchas at the bottom.
+
+### 2026-07-17
+- **Latched-goal follow-me (`nav_controller`)** — first cut of Phase 8: subscribes `fused/tag_pose`
+  + `odom`, publishes `cmd_drive`, broadcasts `odom -> nav_goal` (the dashboard renders it as a
+  green target reticle, distinct from the tag dot). Commits the tag as a point in `odom` and steers
+  to it (heading = atan2 to the goal; on/off `cruise_speed_mps` beyond `follow_distance_m` = 2.0 m,
+  else hold; no reverse). Trust gate on the fused bearing sigma: above `bearing_sigma_high_deg`
+  (10°) it HOLDs — freezes the goal, keeps driving to the last trusted point — and re-acquires after
+  `reacquire_count` (5) fixes below `bearing_sigma_low_deg` (7°, hysteresis; measured normal is
+  5-10°, >10 bad). Storing the goal in `odom` is what makes "keep going to the last known spot"
+  fall out for free — dead reckoning keeps the heading correct as the car moves. No new msg/topic —
+  reuses `cmd_drive`/`fused/tag_pose` + one TF frame. In bringup behind `follow:=true` (default
+  off — it drives the car); by hand it needs the matching namespace (`-r __ns:=/fmbot`) or its
+  topics don't connect. Deferred: the `/follow_me` action (feedback/give-up/cancel), a give-up timeout, a proactive
+  pan-saturation trigger. **Gotcha:** default cruise is 3 mph, above the ESP32's 2.5 mph cap — raise
+  `maxSpeedMph` on the dashboard or every frame is rejected (`cmd_rejects` climbs, car won't move).
+
+### 2026-07-16
+- **Telemetry slim-down: bridge + topics match the new ESP32 frame** — the ESP32 dropped
+  its tag Kalman (`fused_angle`/`fused_dist`/`fused_unc`) and per-sensor speed
+  (`enc_speed`); `speed` is now the onboard fused estimate (throttle PID feedback) and
+  the remaining ESP32 fusion is permanent, so the `fused/` isolation namespace is
+  retired. Accordingly: `FusedTagPose.msg` + `fused/tag_pose` deleted; `CoggingStatus.msg`
+  + `fused/cogging` deleted, cogging folded into `wheel/state` as a bool; new wire fields
+  `yaw_rate` → `imu/data` `angular_velocity.z` (unnegated, consistent with yaw) and
+  `mode` (`SETPOINT`/`DIRECT`/`STOPPED` — `REMOTE` renamed `SETPOINT` on the ESP32) →
+  new `CommandStatus.mode` string. `tag_broadcaster` collapsed to a single instance on
+  `uwb/raw` → `tag_link` (`source` param, `tag_raw_link`, and `raw_tag_broadcaster`
+  removed). Interfaces package needs a clean rebuild — the .msg set changed.
+- **Topic layout: raw-vs-derived convention + renames** — adopted the convention (now in
+  PROJECT_PLAN "Key topics"): raw co-sampled wire fields bundle into one stamped message;
+  derived estimates get their own per-producer topics (`fused/*` / future `pi_fused/*`).
+  Accordingly: `wheel/speed` + `wheel/enc_speed` + `wheel/distance` (unstamped Float32s)
+  merged into `wheel/state` (`WheelState`, stamped — fixes pose_estimator pairing wheel
+  data with IMU by arrival time; bridge publishes wheel BEFORE imu so the cached sample
+  is same-frame); `car/status`/`CarStatus` renamed `actuator/status`/`ActuatorStatus`
+  ("car" was redundant inside the robot namespace). Interfaces package needs a clean
+  rebuild (`rm -rf build install log`) since the .msg set changed.
+- **Raw tag visualization** — `tag_broadcaster` gained a `source` param (`fused` default /
+  `raw`); bringup launches a second instance (`raw_tag_broadcaster`) that projects
+  `uwb/raw` to `uwb_link -> tag_raw_link`, so raw vs fused tag position render side by
+  side. Fixed `UwbRaw.msg` frame comment: bearing is ANCHOR-relative, not car-relative
+  (spec: absolute = yaw + pan_angle + uwb_bearing).
+- **URDF visual pass + steerable front wheels** — front wheel joints are now revolute
+  (steer about z), driven cosmetically from telemetry `steering` via `/joint_states`
+  (`STEER_SIGN`/`MAX_STEER_RAD` in serial_bridge are uncalibrated guesses: ±30° lock,
+  wire + = right — flip/correct when measured). Body shell enlarged to cover the chassis
+  plate (0.300 × 0.170); UWB redrawn as a flat front-back board on the hood (pan-axis
+  lever arm now x = 0.090 — measure); IMU moved to the rear shell deck (x = −0.110,
+  z = 0.125 — measure). Sensor joint origins are TF-real, not just cosmetic.
 
 ### 2026-07-14
 - **ESP32 mode restructure: REMOTE / DIRECT / STOPPED** — the mode roster now matches the

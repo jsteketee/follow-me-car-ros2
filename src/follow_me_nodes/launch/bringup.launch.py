@@ -1,23 +1,6 @@
 #!/usr/bin/env python3
-"""bringup.launch.py — start the full car stack in one command.
-
-Brings up:
-  robot_state_publisher  URDF -> /tf_static (base_link -> imu_link, wheels, uwb_link)
-                         and -> /robot_description, which Foxglove renders as the car
-  serial_bridge          ESP32 JSON telemetry -> ROS2 topics
-  pose_estimator         IMU heading + wheel odometry -> odom -> base_link on /tf
-  tag_broadcaster        tag/pose (bearing+dist) -> uwb_link -> tag_link on /tf
-  foxglove_bridge        websocket for the Foxglove 3D panel (optional)
-
-Launch arguments:
-  namespace    robot namespace for the nodes' topics (default: none)
-  foxglove     start foxglove_bridge alongside (default: true)
-  serial_port  override the ESP32 serial device (default: serial_bridge's own default)
-
-Usage:
-  ros2 launch follow_me_nodes bringup.launch.py
-  ros2 launch follow_me_nodes bringup.launch.py namespace:=fmbot foxglove:=false
-"""
+"""bringup.launch.py — launch the full car stack (state publisher, serial bridge,
+estimators, optional foxglove). Args: namespace, foxglove, serial_port."""
 
 import os
 
@@ -29,34 +12,43 @@ from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+# Import DEFAULT_PORT from the bridge node so launch and node defaults stay in sync.
+from follow_me_nodes.serial_bridge import DEFAULT_PORT
+
 
 def generate_launch_description():
     """Build the launch description for the full car stack."""
     pkg_share = get_package_share_directory("follow_me_nodes")
     urdf_path = os.path.join(pkg_share, "urdf", "follow_me_car.urdf")
 
-    # robot_state_publisher wants the URDF's XML *contents* as a string parameter,
-    # not a path — hand it a path and it silently fails to parse, publishing no
-    # /tf_static and leaving imu_link dangling again. So read the file here.
+    # robot_state_publisher needs the URDF contents (not a path), so read the file here.
     with open(urdf_path, "r") as f:
         robot_description = f.read()
 
     namespace = LaunchConfiguration("namespace")
     foxglove = LaunchConfiguration("foxglove")
+    follow = LaunchConfiguration("follow")
+    serial_port = LaunchConfiguration("serial_port")
 
     return LaunchDescription([
         DeclareLaunchArgument(
-            "namespace", default_value="",
+            "namespace", default_value="fmbot",
             description="Robot namespace applied to node topics (frame ids are unaffected).",
         ),
         DeclareLaunchArgument(
             "foxglove", default_value="true",
             description="Also start foxglove_bridge.",
         ),
+        DeclareLaunchArgument(
+            "follow", default_value="false",
+            description="Also start nav_controller — it publishes cmd_drive and DRIVES the car.",
+        ),
+        DeclareLaunchArgument(
+            "serial_port", default_value=DEFAULT_PORT,
+            description="ESP32 serial device path (default: serial_bridge's own default).",
+        ),
 
-        # Publishes the URDF's fixed joints onto /tf_static, and the URDF itself onto
-        # /robot_description (latched). Deliberately does NOT publish odom -> base_link:
-        # that edge belongs to pose_estimator, and two publishers on one edge fight.
+        # Publishes URDF fixed joints to /tf_static and the URDF to /robot_description; odom->base_link is pose_estimator's.
         Node(
             package="robot_state_publisher",
             executable="robot_state_publisher",
@@ -72,6 +64,7 @@ def generate_launch_description():
             name="serial_bridge",
             namespace=namespace,
             output="screen",
+            parameters=[{"serial_port": serial_port}],
         ),
 
         Node(
@@ -88,6 +81,24 @@ def generate_launch_description():
             name="tag_broadcaster",
             namespace=namespace,
             output="screen",
+        ),
+
+        Node(
+            package="follow_me_nodes",
+            executable="tag_estimator",
+            name="tag_estimator",
+            namespace=namespace,
+            output="screen",
+        ),
+
+        # Off by default (follow:=true): publishes cmd_drive and will drive the car.
+        Node(
+            package="follow_me_nodes",
+            executable="nav_controller",
+            name="nav_controller",
+            namespace=namespace,
+            output="screen",
+            condition=IfCondition(follow),
         ),
 
         # Not namespaced: the bridge serves the whole graph regardless of robot.

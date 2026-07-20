@@ -1,0 +1,54 @@
+/* Dashboard shell: title bar, horizontal metrics strip (wraps on mobile), canvas viewport. */
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body {
+  background: #1a1d21;
+  color: #e6e6e6;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+
+.app { display: flex; flex-direction: column; height: 100%; }
+
+.topbar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 7px 14px; background: #23272c; border-bottom: 1px solid #33383e;
+}
+.topbar .title { font-weight: 600; font-size: 15px; }
+
+/* ---- horizontal metrics strip ---- */
+.metrics {
+  display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 18px;
+  padding: 8px 14px; background: #202429; border-bottom: 1px solid #33383e;
+}
+.metric { display: flex; flex-direction: column; gap: 2px; min-width: 54px; }
+.mlabel { font-size: 10px; color: #8a939b; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
+.mval {
+  font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums;
+  display: flex; align-items: center; gap: 5px; white-space: nowrap;
+}
+.mval.warn { color: #e8894a; }
+
+.dot { width: 9px; height: 9px; border-radius: 50%; background: #888; display: inline-block; flex: none; }
+.dot.connected { background: #46c76a; }
+.dot.connecting { background: #e0b13c; }
+.dot.disconnected { background: #d24b3e; }
+
+/* ---- mode selector row (own line; segmented, tap-friendly for future input) ---- */
+.moderow {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 14px; background: #202429; border-bottom: 1px solid #2c3137;
+}
+.modebtns { display: flex; gap: 6px; flex: 1; max-width: 440px; }
+.modebtn {
+  flex: 1; text-align: center; font-size: 12px; padding: 7px 8px; border-radius: 5px;
+  background: #2a2f35; color: #9aa4ad; border: 1px solid #363c44; user-select: none;
+}
+.modebtn.active { background: #2f6b3c; color: #d7f5df; border-color: #46c76a; font-weight: 600; }
+
+.bar { position: relative; height: 5px; width: 66px; background: #2a2f35; border-radius: 3px; overflow: hidden; margin-top: 3px; }
+.bar-fill { position: absolute; top: 0; bottom: 0; background: #5aa2e6; }
+.bar-mid { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: #4a525a; }
+
+/* ---- canvas ---- */
+.panel { position: relative; flex: 1; min-height: 0; min-width: 0; }
+.viewport { width: 100%; height: 100%; display: block; }

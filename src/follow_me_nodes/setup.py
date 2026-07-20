@@ -1,3 +1,5 @@
+"""setup.py — ament_python packaging for follow_me_nodes (entry points, data files)."""
+
 import os
 from glob import glob
 
@@ -29,6 +31,8 @@ setup(
             "serial_bridge = follow_me_nodes.serial_bridge:main",
             "pose_estimator = follow_me_nodes.pose_estimator:main",
             "tag_broadcaster = follow_me_nodes.tag_broadcaster:main",
+            "tag_estimator = follow_me_nodes.tag_estimator:main",
+            "nav_controller = follow_me_nodes.nav_controller:main",
         ],
     },
 )

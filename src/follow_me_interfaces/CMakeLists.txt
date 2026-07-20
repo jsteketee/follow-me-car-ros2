@@ -10,7 +10,13 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/FusedTagPose.msg"
+  "msg/ActuatorStatus.msg"
+  "msg/CommandStatus.msg"
+  "msg/DisplayFlag.msg"
+  "msg/DriveCommand.msg"
+  "msg/TagEstimate.msg"
+  "msg/UwbRaw.msg"
+  "msg/WheelState.msg"
   DEPENDENCIES std_msgs
 )
 

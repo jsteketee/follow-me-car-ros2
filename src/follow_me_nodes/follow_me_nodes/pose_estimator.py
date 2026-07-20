@@ -10,11 +10,11 @@ from rclpy.node import Node
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu
-from std_msgs.msg import Float32
+from follow_me_interfaces.msg import WheelState
 from tf2_ros import TransformBroadcaster
 
 TOPIC_IMU = "imu/data"
-TOPIC_WHEEL_DISTANCE = "wheel/distance"
+TOPIC_WHEEL_STATE = "wheel/state"
 TOPIC_ODOM = "odom"
 
 
@@ -26,7 +26,7 @@ def yaw_from_quaternion(x, y, z, w):
 
 
 def normalize_angle(a):
-    """Wrap an angle to (-pi, pi]; without this, crossing +/-180 deg reads as a ~360 deg turn."""
+    """Wrap an angle to (-pi, pi]."""
     return math.atan2(math.sin(a), math.cos(a))
 
 
@@ -34,13 +34,13 @@ class PoseEstimator(Node):
     """Integrates IMU heading and wheel distance into a 2D pose in the `odom` frame."""
 
     def __init__(self):
+        """Set up parameters, pubs/subs, and the TF broadcaster."""
         super().__init__("pose_estimator")
 
         self.odom_frame = self.declare_parameter("odom_frame", "odom").value
         self.base_frame = self.declare_parameter("base_frame", "base_link").value
 
-        # The IMU callback drives the loop; the odometer is a bare Float32 with no stamp,
-        # so it can only be sampled, not time-synchronised.
+        # Latest odometer reading, sampled by the IMU callback.
         self._odo_m = None
 
         # Accumulated pose, plus the previous step's values.
@@ -53,7 +53,7 @@ class PoseEstimator(Node):
 
         self.sub_imu = self.create_subscription(Imu, TOPIC_IMU, self._on_imu, 10)
         self.sub_odo = self.create_subscription(
-            Float32, TOPIC_WHEEL_DISTANCE, self._on_odometry, 10
+            WheelState, TOPIC_WHEEL_STATE, self._on_wheel_state, 10
         )
         self.pub_odom = self.create_publisher(Odometry, TOPIC_ODOM, 10)
         # Publishes the same pose onto the global /tf tree. This node owns the
@@ -61,12 +61,12 @@ class PoseEstimator(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         self.get_logger().info(
-            f"pose_estimator up; subscribed to '{TOPIC_IMU}' and '{TOPIC_WHEEL_DISTANCE}'"
+            f"pose_estimator up; subscribed to '{TOPIC_IMU}' and '{TOPIC_WHEEL_STATE}'"
         )
 
-    def _on_odometry(self, msg):
-        """Cache the latest accumulated odometer reading (metres)."""
-        self._odo_m = msg.data
+    def _on_wheel_state(self, msg):
+        """Cache the latest accumulated odometer reading (metres) from wheel/state."""
+        self._odo_m = msg.distance
 
     def _on_imu(self, msg):
         """Integrate one step: project the odometer delta along the midpoint heading."""
@@ -91,8 +91,7 @@ class PoseEstimator(Node):
 
         ds = self._odo_m - self._prev_odo_m
         if ds < 0.0:
-            # Odometer only ever ticks up, so this means the ESP32 rebooted. Re-baseline
-            # rather than teleporting the car backwards.
+            # Negative delta = ESP32 reboot; re-baseline instead of integrating.
             self.get_logger().warn(
                 f"odometer went backwards ({self._prev_odo_m:.3f} -> {self._odo_m:.3f} m); "
                 "ESP32 rebooted? Re-baselining."
@@ -104,8 +103,7 @@ class PoseEstimator(Node):
         theta = normalize_angle(yaw_raw - self._yaw_offset)
         dtheta = normalize_angle(theta - self._theta)
 
-        # The car traced an arc over this step, so project along the midpoint heading —
-        # using either endpoint biases every turn to one side.
+        # Project the distance delta along the midpoint heading.
         theta_mid = self._theta + dtheta / 2.0
         self._x += ds * math.cos(theta_mid)
         self._y += ds * math.sin(theta_mid)

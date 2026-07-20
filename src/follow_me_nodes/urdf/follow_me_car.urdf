@@ -57,12 +57,46 @@
   <link name="base_link"/>
 
   <!-- Chassis plate: the narrow tub the drivetrain bolts to, riding low
-       between the tyres. Underside sits at the ground clearance height. -->
+       between the tyres. Underside sits at the ground clearance height.
+       Same length as the body shell (0.300) so neither overhangs the other.
+       Extra visuals: four control arms reaching from the plate edge out to
+       the wheel hubs (cosmetic only — they don't articulate with steering).
+       Arm origins are in the CHASSIS frame (0.040 above base_link): wheel
+       hubs sit at x +/-0.108, z 0.008 here; arms span plate edge (y 0.040)
+       to the inner tyre face (y 0.092). -->
   <link name="chassis_link">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
-        <box size="0.280 0.080 0.020"/>
+        <box size="0.300 0.080 0.020"/>
+      </geometry>
+      <material name="chassis_grey"/>
+    </visual>
+    <visual>
+      <origin xyz="0.108 0.066 0.004" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.024 0.056 0.010"/>
+      </geometry>
+      <material name="chassis_grey"/>
+    </visual>
+    <visual>
+      <origin xyz="0.108 -0.066 0.004" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.024 0.056 0.010"/>
+      </geometry>
+      <material name="chassis_grey"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.108 0.066 0.004" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.024 0.056 0.010"/>
+      </geometry>
+      <material name="chassis_grey"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.108 -0.066 0.004" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.024 0.056 0.010"/>
       </geometry>
       <material name="chassis_grey"/>
     </visual>
@@ -75,13 +109,14 @@
   </joint>
 
   <!-- Body shell: the painted lexan cab that gives the truck its silhouette.
-       Sits above the plate, inboard of the tyres, shorter than the wheelbase
-       span so the wheels stay proud of it. -->
+       Sits above the plate and covers it in plan (0.300 x 0.170 over the
+       0.300 x 0.080 plate), like the real body. Still inboard of the tyres
+       (inner tyre faces at y = +/-0.092) so the wheels stay proud of it. -->
   <link name="body_link">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
-        <box size="0.230 0.140 0.070"/>
+        <box size="0.300 0.170 0.070"/>
       </geometry>
       <material name="body_red"/>
     </visual>
@@ -94,11 +129,12 @@
   </joint>
 
   <!-- =================================================================
-       wheels — all four are FIXED joints, not continuous. Continuous
-       joints would make robot_state_publisher demand a /joint_states
-       stream we do not publish; it would warn forever and the wheels
-       would never move anyway. Fixed keeps the tree clean. Revisit only
-       if rendering wheel spin or steering angle is worth the plumbing.
+       wheels — REAR wheels are FIXED joints (no per-wheel spin feedback, and
+       wheel spin isn't worth rendering). FRONT wheels are REVOLUTE about z:
+       a steer joint at each hub, driven live from /joint_states, which
+       serial_bridge publishes from the telemetry `steering` value (normalized
+       [-1, 1] scaled by the assumed +/-30 deg lock — see STEER_* constants
+       there). Wheel SPIN stays unmodeled on all four.
 
        Cylinders are born about z, so rpy rolls them onto the y axis.
        Centres: x = +/-0.108 (wheelbase), y = +/-0.113 (track),
@@ -113,10 +149,17 @@
       <material name="tyre_black"/>
     </visual>
   </link>
-  <joint name="base_to_front_left_wheel" type="fixed">
+  <!-- Steer about vertical at the hub. Limits are the ASSUMED +/-30 deg lock
+       (0.5236 rad) — the real lock angle and the wire's steering sign are both
+       uncalibrated (NOTES.md); correct limits here and STEER_SIGN in
+       serial_bridge if the render mirrors reality. Velocity is a nominal RC
+       servo slew (~400 deg/s). -->
+  <joint name="base_to_front_left_wheel" type="revolute">
     <parent link="base_link"/>
     <child link="front_left_wheel"/>
     <origin xyz="0.108 0.113 0.048" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.5236" upper="0.5236" effort="1.0" velocity="7.0"/>
   </joint>
 
   <link name="front_right_wheel">
@@ -128,10 +171,12 @@
       <material name="tyre_black"/>
     </visual>
   </link>
-  <joint name="base_to_front_right_wheel" type="fixed">
+  <joint name="base_to_front_right_wheel" type="revolute">
     <parent link="base_link"/>
     <child link="front_right_wheel"/>
     <origin xyz="0.108 -0.113 0.048" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.5236" upper="0.5236" effort="1.0" velocity="7.0"/>
   </joint>
 
   <link name="rear_left_wheel">
@@ -171,9 +216,10 @@
        wrong and heading is still correct (yaw is unaffected by a pure
        translation) but any future accel-based work is biased.
 
-       Mounted at the REAR of the car, on the chassis plate under the shell.
-       x = -0.100 puts it just behind the rear axle (which is at x = -0.108);
-       MEASURE this offset. y = 0 assumes it is centred across the plate.
+       Mounted on TOP of the body shell at the REAR (the rear deck). Shell roof
+       is at z = 0.120; z = 0.125 puts the box centre half its 0.010 height
+       above that. x = -0.110 is the rear deck area; MEASURE both offsets.
+       y = 0 assumes it is centred across the shell.
 
        rpy is zero, i.e. the board's axes are assumed aligned with the car's:
        chip +x forward, +z up. If the board is rotated or inverted on its mount,
@@ -184,7 +230,7 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
-        <box size="0.020 0.020 0.005"/>
+        <box size="0.030 0.020 0.010"/>
       </geometry>
       <material name="sensor_teal"/>
     </visual>
@@ -192,32 +238,49 @@
   <joint name="base_to_imu" type="fixed">
     <parent link="base_link"/>
     <child link="imu_link"/>
-    <origin xyz="-0.100 0 0.053" rpy="0 0 0"/>
+    <origin xyz="-0.110 0 0.125" rpy="0 0 0"/>
   </joint>
 
   <!-- =================================================================
-       uwb_link — the DW3000 AoA anchor, front-mounted and facing forward
-       so its +/-60 deg cone is centred on the car's heading.
+       uwb_link — the DW3000 AoA anchor. Mounted on a PAN SERVO, so this is a
+       REVOLUTE joint (about z, at the mount) rather than fixed: the anchor
+       rotates relative to the car to keep the tag in its ~+/-60 deg cone. The
+       joint is driven live from /joint_states, published by serial_bridge from
+       the telemetry pan_angle (see PAN_JOINT_NAME there).
 
-       Nothing stamps this frame yet (tag/pose currently carries base_link),
-       but the anchor — not base_link — is the true origin of the bearing
-       and distance fix, so the frame exists ready for tag/pose to be
-       re-stamped onto it. The 0.170 m lever arm is small next to the
-       <10 cm ranging error, but it is not zero.
+       Putting the pan in the TF here means everything downstream composes for
+       free: Foxglove renders the anchor at its true angle, and the chain
+       odom -> base_link -> uwb_link -> tag_link yields the tag's absolute
+       position with the pan already accounted for. The raw/fused bearings are
+       sensor-relative (measured in this rotated frame) and need no separate pan
+       term. The ~0.09 m lever arm is small next to the <10 cm ranging error,
+       but it is not zero.
+
+       Sits on the HOOD (front of the shell roof, z = 0.120): a long, thin
+       board, long axis front-back, spinning on the pan servo beneath it.
+       x = 0.090 is mid-hood; MEASURE the true pan-axis position — it IS the
+       lever arm. The visual is dropped -0.006 so the 0.008-thick board rests
+       on the hood while the frame origin stays at the pan axis (z = 0.130).
        ================================================================= -->
   <link name="uwb_link">
     <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <origin xyz="0 0 -0.006" rpy="0 0 0"/>
       <geometry>
-        <box size="0.010 0.060 0.030"/>
+        <box size="0.100 0.020 0.008"/>
       </geometry>
       <material name="uwb_orange"/>
     </visual>
   </link>
-  <joint name="base_to_uwb" type="fixed">
+  <joint name="base_to_uwb" type="revolute">
     <parent link="base_link"/>
     <child link="uwb_link"/>
-    <origin xyz="0.150 0 0.135" rpy="0 0 0"/>
+    <origin xyz="0.090 0 0.130" rpy="0 0 0"/>
+    <!-- Pan about vertical at the mount. position (rad) is driven by serial_bridge
+         as -radians(pan_angle): the wire's pan_angle is +right/CW, TF +z is +left/CCW.
+         Limits are the firmware's symmetric PAN_MAX_DEG (+/-55 deg = +/-0.9599 rad);
+         velocity is the 50 deg/s slew (0.8727 rad/s). -->
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.9599" upper="0.9599" effort="1.0" velocity="0.8727"/>
   </joint>
 
 </robot>
