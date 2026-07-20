@@ -32,6 +32,67 @@ naming, throttle-only failsafe, REMOTE/DIRECT/STOPPED modes, echo-field set.)
   cmd_timeout_ms, fw id. Pi discovers limits instead of duplicating config — duplication
   can't work anyway since maxSpeedMph is dashboard-tunable at runtime.
 
+- **Split rpm.cpp into hall / encoder / speed-fusion modules (todo, deferred 2026-07-16)**:
+  rpm.cpp mixes three concerns with separate state — hall driver (ISR, EMA, odometry,
+  spike rejection), AS5600 encoder driver (I2C, EMA velocity, cogging state machine),
+  and the 2-state fused-speed KF. Split into `hall.cpp`, `encoder.cpp`, and a fusion
+  module (`speed_fusion` or `speed_est` — NOT `rpm_fusion`, nothing is in RPM units;
+  and not `hal.cpp`, which collides with serial_hal's HAL). Coupling to route through
+  main.cpp per the existing wiring pattern: (1) cogging ↔ hall is bidirectional — hall
+  speed gates cogging detection, cogging flag zeroes hall speed and pauses odometry;
+  (2) fusion corrects on per-sample *raw* values (currently driver-local), so drivers
+  must expose new-raw-sample events; the hall-silence-at-speed zero correction is
+  fusion policy consuming hall staleness, not hall-driver logic; (3) the speed-ramped
+  encoder R gates on the fused estimate, so `fused_enc_r()` moves to the fusion module.
+  KF correction ordering (predict → encoder correct → hall correct per loop) must
+  survive exactly; re-verify on the bench. Field rename (hallRaw/hallSpeed/encRaw/
+  encSpeed/fusedSpeed, done 2026-07-16) already landed separately.
+
+### ESP32 fusion split — permanent vs removable (decided 2026-07-16)
+Authoritative placement of estimation/fusion logic. Rule: complexity lives on the Pi unless
+it is inside an onboard control loop or must survive serial loss.
+
+**Permanent on the ESP32 (never migrates):**
+- **Speed estimation** (hall EMA + spike rejection, rpm.cpp) — it is the throttle PID's
+  measurement; putting the serial link inside that loop is never acceptable.
+- **Cogging detection** — fused into the speed estimate (rpm.cpp forces `speedMph` → 0 while
+  cogging is latched), so it is part of the PID measurement path, and it gates odometry
+  accumulation at the integrator. Detector quality is a control concern: a false positive
+  reads as zero speed and winds the throttle up.
+- **Odometry integration** (+ its cogging gate) — must integrate at pulse resolution on-device.
+
+**Removable — and now removed (stripped from firmware 2026-07-16, before Phase 5, by
+explicit decision; Phase 5 is the replacement):**
+- **Tag bearing/distance Kalman + uncertainty/erratic detector** (`fusion.cpp` entirely) —
+  bearing composition verified correct 2026-07-16 (do not "fix" its sign); improvements
+  (UWB lag compensation ~300–500 ms anchor smoothing, yaw-rate trust gating, AOA
+  linearization ~23° residual at 60°) are built Pi-side only, never in fusion.cpp.
+
+**Fusion tunables snapshot (captured 2026-07-16, before the firmware strip — these values
+otherwise exist only in deleted code; Phase 5 port starts here):**
+- Bearing KF: scalar Kalman on absolute compass bearing; measurement `yaw − uwb_bearing`
+  wrapped to [0,360); innovation wrapped to ±180; gain `k = P/(P+R)`; no per-step process
+  noise — P grows only via staleness: `P += (STALE_UNCERTAINTY/TIMEOUT_SEC)·dt` every loop.
+  Seed: bearing = boot yaw (tag assumed ahead), initial P = 1000 deg².
+- `FUSION_KALMAN_R_UWB = 15.0` deg² (stationary bench: σ≈3–4°)
+- `FUSION_SENSOR_TIMEOUT_SEC = 3.0` s; `FUSION_STALE_UNCERTAINTY = 150` deg²
+  (steady state ~17, erratic movement ~120 — gate threshold calibration)
+- Erratic detector: `mean += 0.4·(innov − mean)` (`FUSION_INNOV_MEAN_ALPHA`);
+  `ewma = 0.15·(innov − mean)² + 0.85·ewma` (`FUSION_INNOV_EWMA_ALPHA`), capped at
+  1.1×STALE_UNCERTAINTY. Reported uncertainty = P + ewma.
+- Distance KF (scalar, cm): `UWB_KALMAN_Q = 8.0` (process, tracks walking speed),
+  `UWB_KALMAN_R = 20.0` (stationary σ≈4 cm); dead-reckoned between fixes by subtracting
+  wheel-odometry delta (floor 0).
+- Known flaws to fix in the port, not reproduce: anchor angle lag ~300–500 ms uncompensated;
+  AOA nonlinearity uncorrected (~23° residual at 60° true); erratic detector inflates
+  *reported* uncertainty but never the Kalman gain, so recovery from a genuine step is slow.
+
+**Pi's role for the permanent items:** offline characterization and threshold
+validation/tuning from telemetry (`enc_speed`, `speed`, `throttle`, `cogging`) — never
+runtime detection. Open firmware question noted 2026-07-16: the speed-threshold cogging
+clear (rpm.cpp `RPM_COGGING_MAX_SPEED_MPH` check) looks unreachable while latched, since
+cogging forces `speedMph` to 0 — encoder velocity is the only live exit path.
+
 ### Pi reimplementation checklist (behaviors stripped from the ESP32 2026-07-13/14 that
 PROJECT_PLAN does not yet capture explicitly — fold into Phases 5/8 when building them)
 - **Stale-estimate throttle gating**: FOLLOW_ME only drove when fusion uncertainty was

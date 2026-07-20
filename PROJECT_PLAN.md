@@ -58,10 +58,14 @@ downstream is SI by construction and needs no scale factors.
 per-sensor speeds (hall, AS5600 `enc_speed`) are no longer streamed: speed fusion lives
 permanently on the ESP32 and the Pi treats `speed` as *the* speed. `cogging` is the ESP32
 latching cogging flag (0/1).
-`yaw_rate` is the IMU yaw rate (deg/s, same sign convention as `yaw`).
+`yaw_rate` is the IMU yaw rate (deg/s, same sign convention as `yaw`) — the first difference
+of consecutive rotation-vector yaws at ~100 Hz, for Pi-side trust gating of UWB bearing
+measurements during rotation.
 `lax` is IMU linear acceleration along the sensor x-axis (forward/back, m/s², gravity removed;
 axis/sign pending bench verification). `mode` is the live control mode (`control_mode_str()`:
-`SETPOINT` / `DIRECT` / `STOPPED`). `cmd_speed`/`cmd_heading`/`cmd_pan`/`cmd_age` echo
+`SETPOINT` / `DIRECT` / `STOPPED`). The dashboard is the sole mode authority (serial frames
+never change it), so the bridge should surface mode and warn when it is streaming command
+frames the current mode will not act on. `cmd_speed`/`cmd_heading`/`cmd_pan`/`cmd_age` echo
 the last **accepted** command values and the age of the last accepted setpoint frame in ms
 (−1 = none since boot; age > 300 = cmd-timeout failsafe active) so the bridge can verify
 what the car is acting on. `cmd_rejects` (added 2026-07-14) counts command values rejected
