@@ -12,11 +12,13 @@ find_package(std_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ActuatorStatus.msg"
   "msg/CommandStatus.msg"
-  "msg/DisplayFlag.msg"
   "msg/DriveCommand.msg"
+  "msg/NavMode.msg"
+  "msg/SensorHealth.msg"
   "msg/TagEstimate.msg"
   "msg/UwbRaw.msg"
   "msg/WheelState.msg"
+  "srv/SetNavMode.srv"
   DEPENDENCIES std_msgs
 )
 

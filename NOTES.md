@@ -4,7 +4,8 @@
 
 The running state of the project: current focus, build log, navigation modes, brainstorming,
 open questions, and hardware setup notes. Authoritative for what's true and decided
-right now — the live counterpart to PROJECT_PLAN.md's durable specs.
+right now — the live counterpart to PROJECT_PLAN.md's durable specs. The ESP32 ↔ Pi wire
+interface is specified in **`interface.md`** (the SOT); notes here don't re-spec fields.
 
 ## To Do
 
@@ -16,21 +17,68 @@ raw `uwb_*` only: raw fixes drive `tag_link` directly until Phase 5 provides fil
 frames with validation, `SETPOINT` mode (the boot default, holding boot heading; named
 `REMOTE` until 2026-07-16), and the cmd-timeout failsafe (revised: throttle-only;
 steering holds last heading) — bench-validated on the stand. Bridge updated 2026-07-16
-to the slimmed telemetry frame (full schema in PROJECT_PLAN "Serial Protocol").
+to the slimmed telemetry frame (full schema in interface.md).
 A reactive follow-me controller (`nav_controller`) now closes the loop: fused tag ->
 `cmd_drive` -> car (first cut of Phase 8, 2026-07-17). Next layers: confidence gating +
 the ±60° recovery behavior, then the `/follow_me` action and the `NavigateToPose` /
 waypoint action servers. See PROJECT_PLAN.md Phases 8-10.
+**nav_mode shipped 2026-07-20**: `mode_manager` owns the Pi-side navigation mode (latched
+`nav_mode` topic + gated `set_nav_mode` service; boots to `follow`), `nav_controller` gates
+on it (`active_mode` param) and the `follow:=true` launch arg is gone — the stack always
+launches both nodes. `CommandStatus.mode` renamed `command_mode` (wire key unchanged).
+Dashboard: nav-mode buttons call the service; `/rosout` WARN+ overlay on the 2D panel;
+ESP32 `{"type":"log",...}` event frames re-log to `/rosout` (firmware emit side still todo).
 
 (The command-path design spec `docs/hal-command-path.md` was deleted 2026-07-14: the phase
-is implemented and its settled decisions were folded into PROJECT_PLAN's Serial Protocol
+is implemented and its settled decisions were folded into interface.md
 section, which supersedes the draft on every point where they differed — `target_heading`
 naming, throttle-only failsafe, REMOTE/DIRECT/STOPPED modes, echo-field set.)
+
+### Next up (added 2026-07-22)
+- **Direct control from the dashboard**: get bench teleop working end-to-end through the
+  ESP32 `DIRECT` actuator mode (raw `{"throttle","steering","target_pan"}` frames). The
+  firmware side (DIRECT mode + validation + Remote/Direct/Stopped buttons) already exists
+  (2026-07-14); the dashboard direct-drive controls were flagged there as a follow-up, plus
+  whatever Pi-side command path is needed to carry DIRECT frames (bridge currently only
+  sends SETPOINT `cmd_drive`).
+- **Simple follow command mode**: a minimal "steer toward the tag" follow behavior, below
+  the full Phase 8 latched-goal `nav_controller` — a small, easy-to-reason-about first cut.
+- **Home for diagnostic flags, readiness, and policy substate** (open design decision):
+  decide where sensor readiness, diagnostic flags, and nav-policy substate live — extend
+  `SensorHealth`, add a new status msg, or fold into `mode_manager`/`CommandStatus`. Today
+  these are scattered / implicit; they need one designated place.
+- **Pi-side telemetry throughput** (regression, 2026-07-22): ESP32 loop perf recovered, but
+  the bridge now ingests only ~10–20 telem frames/s vs the 50 Hz target — the bottleneck
+  moved to the Pi consumer. Leading suspects (all in `serial_bridge.py` read loop): per-line
+  INFO logging of every `[esp32-raw]` line (`serial_bridge.py:274`) under `ros2 launch`
+  (stdout piped → blocks); `ser.readline()` reading one byte per syscall (switch to
+  `ser.read(ser.in_waiting)` + buffer-split); and read+`json.loads`+`_publish` all inline in
+  one thread under the GIL (split the drain from parse/publish via a queue). Isolate the
+  drain ceiling first with `cat /dev/ttyACM0 >/dev/null` (fastest possible consumer) to
+  confirm it's the bridge, not the link.
+  - *Tentative (unconfirmed hypothesis, 2026-07-22):* this may be the SAME Pi-drain problem
+    that earlier caused ESP32 serial backpressure, now wearing a different mask. If the ESP32
+    write is now non-blocking (drops a frame when its TX buffer is full instead of stalling
+    the loop), a slow Pi consumer would show up precisely as reduced frame rate — the ESP32
+    stops waiting and drops whatever the Pi didn't drain in time. Would make the fix identical
+    (faster Pi read path). Not verified: haven't confirmed the firmware write is drop-on-full,
+    nor that dropped frames (vs. Pi-side parse failures) are where the missing 30 Hz go.
 
 - **Capabilities announcement (todo)**: ESP32 declares hardware limits over serial (boot +
   `{"get":"caps"}` + on rtConfig change): max_speed, pan_max_deg, pan_slew_dps,
   cmd_timeout_ms, fw id. Pi discovers limits instead of duplicating config — duplication
-  can't work anyway since maxSpeedMph is dashboard-tunable at runtime.
+  can't work anyway since maxSpeedMph is dashboard-tunable at runtime. The bridge's typed
+  event-frame dispatch (2026-07-20) is the landing zone: emit `{"type":"caps",...}`.
+
+- **Firmware: typed event frames + de-moding (`follow-me-car-esp32` repo, `ros2-hal`
+  branch)**: (B) log frames and (C) health frames **shipped firmware-side 2026-07-21** —
+  warn/error-only log roster (emission list in the firmware repo docs), health at 1 Hz
+  (`imu`/`uwb`/`enc`/`hall`/`loop`), best-effort delivery (drop-never-block), plus an
+  additive telemetry field `enc_fault` (now on WheelState) and asymmetric fails-high
+  `speed` semantics — all folded into interface.md 2026-07-21.
+  **(A) de-moding is still TODO**: remove ControlMode, act on the most recent valid
+  command frame by shape, telemetry `mode` becomes `acting_on`. Pi bridge still parses
+  the old `mode` key until (A) lands.
 
 - **Split rpm.cpp into hall / encoder / speed-fusion modules (todo, deferred 2026-07-16)**:
   rpm.cpp mixes three concerns with separate state — hall driver (ISR, EMA, odometry,
@@ -124,7 +172,6 @@ PROJECT_PLAN does not yet capture explicitly — fold into Phases 5/8 when build
   sliders are then dead UI to remove.
 
 ### Open issues 
-- Reverse is invisible — `odo` doesn't tick backwards, so dead reckoning freezes in reverse.
 - UWB only reliable to +/- 60 degrees. 
 - UWB bearing lags reality by ~0.3s (anchor-side smoothing, measured 2026-07-14) — Pi
   should inflate bearing uncertainty while `pan_angle` is changing between frames; see
@@ -144,7 +191,7 @@ PROJECT_PLAN does not yet capture explicitly — fold into Phases 5/8 when build
 
 ### Open questions
 - ~~Command-path numbers~~ **decided 2026-07-12**: 20 Hz re-send / 300 ms timeout, hybrid
-  resume — see PROJECT_PLAN "Command stream contract".
+  resume — see PROJECT_PLAN "Serial Link".
 - ~~Boot default is still `FOLLOW_ME`~~ **resolved 2026-07-13**: `DEFAULT_NAV_MODE` is now
   REMOTE — a rebooted car waits at zero throttle holding its boot heading instead of
   re-entering autonomy (FOLLOW_ME's onboard control block is commented out entirely). The
@@ -286,8 +333,8 @@ description-only. The code keeps one-line pointers back here.
 **pose_estimator.py**
 - Odometer is cached by the IMU callback; both come from the same serial frame, and the bridge
   publishes wheel before imu, so the sample is same-frame.
-- Negative odometer delta = ESP32 reboot (the odometer only ticks up): re-baseline rather than
-  teleporting the car backwards.
+- Signed odometer delta — reverse subtracts. The bridge stitches the odometer continuous across
+  ESP32 reboots (interface.md), so the integrator has no reboot special-case.
 - Project the distance delta along the MIDPOINT heading (the car traced an arc over the step);
   using either endpoint biases every turn to one side.
 

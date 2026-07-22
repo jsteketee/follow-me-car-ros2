@@ -1,6 +1,6 @@
 # Drive setpoint for the car: forward speed + absolute heading, SI / REP-103.
 # The serial bridge converts to the ESP32 wire contract (mph / device compass deg)
-# on write — see PROJECT_PLAN.md "Serial Protocol". The header stamp gates staleness:
+# on write — see interface.md. The header stamp gates staleness:
 # the bridge stops transmitting when the latched command's stamp is older than 500 ms.
 
 std_msgs/Header header

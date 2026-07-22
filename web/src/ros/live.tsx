@@ -4,14 +4,16 @@
 import { createContext, useContext, useRef, MutableRefObject, ReactNode } from "react";
 import { useRosTopic } from "./foxglove";
 import { Edge, yawFromQuat } from "./tf2d";
-import { TFMessage, ActuatorStatus, CommandStatus, TagEstimate } from "./types";
+import { TFMessage, ActuatorStatus, CommandStatus, NavMode, SensorHealthMsg, TagEstimate } from "./types";
 import { ns } from "./topics";
 
 export type LiveStatus = {
   steering: number; throttle: number; pan: number;
-  mode: string; cmdSpeed: number; cmdHeading: number; cmdAgeMs: number; cmdRejects: number;
+  commandMode: string; cmdSpeed: number; cmdHeading: number; cmdAgeMs: number; cmdRejects: number;
+  navMode: string;
   tagRangeSigma: number; tagBearingSigma: number; tagCoasting: boolean; tagAgeMs: number;
-  hasStatus: boolean; hasCmd: boolean; hasTagEst: boolean;
+  health: { name: string; hz: number }[]; healthWall: number; maxLoopUs: number; telemFrames1s: number;
+  hasStatus: boolean; hasCmd: boolean; hasNavMode: boolean; hasTagEst: boolean; hasHealth: boolean;
 };
 
 export type LiveRefs = {
@@ -25,9 +27,11 @@ export function LiveProvider({ children }: { children: ReactNode }) {
   const treeRef = useRef<Map<string, Edge>>(new Map());
   const statusRef = useRef<LiveStatus>({
     steering: 0, throttle: 0, pan: 0,
-    mode: "", cmdSpeed: 0, cmdHeading: 0, cmdAgeMs: -1, cmdRejects: 0,
+    commandMode: "", cmdSpeed: 0, cmdHeading: 0, cmdAgeMs: -1, cmdRejects: 0,
+    navMode: "",
     tagRangeSigma: 0, tagBearingSigma: 0, tagCoasting: false, tagAgeMs: -1,
-    hasStatus: false, hasCmd: false, hasTagEst: false,
+    health: [], healthWall: 0, maxLoopUs: 0, telemFrames1s: 0,
+    hasStatus: false, hasCmd: false, hasNavMode: false, hasTagEst: false, hasHealth: false,
   });
 
   // Fold each transform into the tree, keyed by child frame, stamped with arrival time.
@@ -52,8 +56,19 @@ export function LiveProvider({ children }: { children: ReactNode }) {
   });
   useRosTopic(ns("command/status"), (m: CommandStatus) => {
     const s = statusRef.current;
-    s.mode = m.mode; s.cmdSpeed = m.cmd_speed; s.cmdHeading = m.cmd_heading;
+    s.commandMode = m.command_mode; s.cmdSpeed = m.cmd_speed; s.cmdHeading = m.cmd_heading;
     s.cmdAgeMs = m.cmd_age_ms; s.cmdRejects = m.cmd_rejects; s.hasCmd = true;
+  });
+  useRosTopic(ns("nav_mode"), (m: NavMode) => {
+    const s = statusRef.current;
+    s.navMode = m.mode; s.hasNavMode = true;
+  });
+  useRosTopic(ns("sensor_health"), (m: SensorHealthMsg) => {
+    const s = statusRef.current;
+    s.health = Array.from(m.names, (n, i) => ({ name: n, hz: m.rates_hz[i] ?? 0 }));
+    s.maxLoopUs = m.max_loop_us ?? 0;
+    s.telemFrames1s = m.telem_frames_1s ?? 0;
+    s.healthWall = performance.now() / 1000; s.hasHealth = true;
   });
   useRosTopic(ns("fused/tag_pose"), (m: TagEstimate) => {
     const s = statusRef.current;

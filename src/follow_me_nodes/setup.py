@@ -33,6 +33,7 @@ setup(
             "tag_broadcaster = follow_me_nodes.tag_broadcaster:main",
             "tag_estimator = follow_me_nodes.tag_estimator:main",
             "nav_controller = follow_me_nodes.nav_controller:main",
+            "mode_manager = follow_me_nodes.mode_manager:main",
         ],
     },
 )

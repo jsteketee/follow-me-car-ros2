@@ -303,22 +303,6 @@ def test_latency_regression_recovers_injected_slope(node):
     assert n._latency_ns / 1e9 == pytest.approx(LATENCY_GAIN * delay, abs=1e-4)
 
 
-def test_cal_flag_lifecycle(node):
-    """(14) 'Cal' flag is raised on the first fix and cleared once latency converges, once each."""
-    n, _ = node
-    flags = []
-    n.pub_flag = type("FakeFlagPub", (), {"publish": lambda self, m: flags.append((m.text, m.action))})()
-
-    prime(n)
-    n._on_uwb_raw(make_fix(2.0, 0.0, 0, now_ns(n)))       # first fix -> raise Cal
-    assert flags == [("Cal", 1)]
-
-    for _ in range(LATENCY_N_MIN):                         # drive convergence
-        n._accumulate_latency(2.0, 2.0 * 0.040)
-    assert ("Cal", -1) in flags
-    assert sum(1 for t, a in flags if a == -1) == 1        # cleared exactly once (single edge)
-
-
 def test_latency_sign_and_slow_rotation(node):
     """(13) A negative slope drives latency negative; sub-threshold yaw rate is ignored."""
     n, _ = node

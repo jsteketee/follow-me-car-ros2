@@ -11,7 +11,7 @@ import pytest
 import rclpy
 
 from nav_msgs.msg import Odometry
-from follow_me_interfaces.msg import DisplayFlag, DriveCommand
+from follow_me_interfaces.msg import DriveCommand
 from follow_me_nodes.serial_bridge import SerialBridge, MPH_TO_MPS
 
 
@@ -72,14 +72,6 @@ def make_odom(yaw_rad, stamp_ns):
 def make_telem(ts, yaw=0.0):
     """Minimal telemetry dict for _publish (all other fields default via .get)."""
     return {"ts": ts, "yaw": yaw}
-
-
-def make_flag(text, action):
-    """Build a DisplayFlag with the given label and action (+1 add / -1 remove)."""
-    f = DisplayFlag()
-    f.text = text
-    f.action = int(action)
-    return f
 
 
 def establish_offset(node, device_deg, odom_yaw_rad, t_ns=None):
@@ -222,59 +214,3 @@ def test_speed_passthrough_and_nan_reject(node):
 
     n._on_cmd_drive(make_cmd(0.5, float("nan")))  # non-finite heading -> not latched (guard kept)
     assert n._latched[0] == -1.0           # prior latch (speed -1.0) intact, NaN not stored
-
-
-def test_flag_sends_without_command(node):
-    """(8) A display flag transmits with no fresh command — not gated by staleness."""
-    n, fake = node
-    establish_offset(n, 0.0, 0.0)          # offset exists, but nothing latched on cmd_drive
-    n._on_display_flag(make_flag("OBSTACLE", 1))
-    n._tx_tick()
-    assert last_frame(fake) == {"flag": "OBSTACLE", "flag_action": 1}
-
-
-def test_flag_rides_with_command(node):
-    """(9) A flag and a fresh command share one frame (single writer, one line)."""
-    n, fake = node
-    establish_offset(n, 0.0, 0.0)
-    n._on_cmd_drive(make_cmd(0.5, 0.0))
-    n._on_display_flag(make_flag("REC", 1))
-    n._tx_tick()
-    frame = last_frame(fake)
-    assert frame["flag"] == "REC" and frame["flag_action"] == 1
-    assert "target_speed" in frame         # command still present in the same frame
-
-
-def test_flags_one_per_tick(node):
-    """(10) Queued flags drain one op per tick, in order."""
-    n, fake = node
-    establish_offset(n, 0.0, 0.0)
-    n._on_display_flag(make_flag("A", 1))
-    n._on_display_flag(make_flag("B", -1))
-    n._tx_tick()
-    assert last_frame(fake) == {"flag": "A", "flag_action": 1}
-    n._tx_tick()
-    assert last_frame(fake) == {"flag": "B", "flag_action": -1}
-
-
-def test_flag_text_json_escaped(node):
-    """(11) Flag text with quotes stays valid JSON (last_frame's json.loads would fail otherwise)."""
-    n, fake = node
-    establish_offset(n, 0.0, 0.0)
-    n._on_display_flag(make_flag('say "hi"', 1))
-    n._tx_tick()
-    assert last_frame(fake)["flag"] == 'say "hi"'
-
-
-def test_flag_not_sent_during_halt(node):
-    """(12) A reboot halt blocks flag TX too; the op stays queued until TX resumes."""
-    n, fake = node
-    establish_offset(n, 0.0, 0.0)
-    n._publish(make_telem(ts=1000))        # capture clock offset
-    n._publish(make_telem(ts=500))         # ts backwards -> reboot -> halt
-    assert n._halt is True
-
-    n._on_display_flag(make_flag("X", 1))
-    n._tx_tick()
-    assert fake.writes == []               # halted -> nothing sent
-    assert len(n._pending_flags) == 1      # flag not dropped, still queued

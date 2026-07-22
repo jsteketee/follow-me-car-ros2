@@ -3,9 +3,10 @@
 # cmd_age_ms resetting means frames are landing; cmd_rejects ticking means they're
 # arriving but failing validation. Also carries the ESP32's live control mode, since the
 # mode decides which command shape is acted on. Values are the ESP32's accepted setpoints
-# converted to SI / REP-103 at the bridge. See PROJECT_PLAN.md "Serial Protocol".
+# converted to SI / REP-103 at the bridge. See interface.md.
 std_msgs/Header header
-string  mode          # ESP32 control mode this frame: "SETPOINT", "DIRECT", or "STOPPED"
+string  command_mode  # ESP32 control mode this frame: "SETPOINT", "DIRECT", or "STOPPED"
+                      #   (wire key stays "mode"; distinct from the Pi-side NavMode)
 float32 cmd_speed     # m/s, last accepted forward setpoint
 float32 cmd_heading   # rad, last accepted absolute heading, odom frame (REP-103, CCW +);
                       #   the bridge converts device compass deg -> odom rad via the same

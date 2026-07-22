@@ -89,16 +89,9 @@ class PoseEstimator(Node):
         if dt <= 0.0:
             return  # duplicate or stale stamp
 
+        # Signed delta: reverse subtracts. The bridge stitches the odometer continuous across
+        # ESP32 reboots (interface.md), so ds never jumps on reboot -> no reboot special-case.
         ds = self._odo_m - self._prev_odo_m
-        if ds < 0.0:
-            # Negative delta = ESP32 reboot; re-baseline instead of integrating.
-            self.get_logger().warn(
-                f"odometer went backwards ({self._prev_odo_m:.3f} -> {self._odo_m:.3f} m); "
-                "ESP32 rebooted? Re-baselining."
-            )
-            self._prev_odo_m = self._odo_m
-            self._prev_stamp_ns = stamp_ns
-            return
 
         theta = normalize_angle(yaw_raw - self._yaw_offset)
         dtheta = normalize_angle(theta - self._theta)
@@ -115,7 +108,7 @@ class PoseEstimator(Node):
         self._prev_odo_m = self._odo_m
         self._prev_stamp_ns = stamp_ns
 
-        self.get_logger().info(
+        self.get_logger().debug(
             f"x={self._x:+7.3f}m  y={self._y:+7.3f}m  theta={math.degrees(self._theta):+7.2f}deg",
             throttle_duration_sec=1.0,
         )

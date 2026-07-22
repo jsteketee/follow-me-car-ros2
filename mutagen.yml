@@ -1,0 +1,54 @@
+# mutagen.yml — sync sessions for the follow-me-car workspace.
+#   Start:   mutagen project start        (from this dir, on the Mac)
+#   Status:  mutagen sync list
+#   Pause:   mutagen project pause
+#   Stop:    mutagen project terminate
+#
+# Two purpose-built one-way sessions (ignores are per-session on purpose — the
+# `bags` session must NOT inherit fmcar's *.mcap ignore):
+#   fmcar  Mac -> Pi   source code (Mac is authoritative)
+#   bags   Pi  -> Mac  rosbag recordings from ~/follow-me-car-ros2/bags/
+#
+# one-way-safe: the alpha side is authoritative; the beta side is never synced
+# back and never clobbered (conflicts are flagged, not overwritten).
+sync:
+  defaults:
+    mode: one-way-safe
+
+  # Source: Mac (alpha) -> Pi (beta). Ignores build outputs, per-machine config,
+  # rosbags, and the bags/ dir (owned by the `bags` session below).
+  fmcar:
+    alpha: "."
+    beta: "followme-pi:follow-me-car-ros2"
+    ignore:
+      vcs: true               # don't sync .git — each machine keeps its own history
+      paths:
+        - "/build/"           # colcon outputs — built on each machine
+        - "/install/"
+        - "/log/"
+        - "__pycache__/"
+        - "*.pyc"
+        - ".pytest_cache/"
+        - "node_modules/"      # web/ deps — installed on each machine
+        - "dist/"
+        - "CLAUDE.md"          # per-machine local agent config
+        - "/.claude/"
+        - "/.vscode/"
+        - "/.devcontainer/"    # host-only dev container config
+        - "*.mcap"             # rosbags handled by the `bags` session, not here
+        - "*.db3"
+        - "/rosbag2_*/"
+        - "/tag_rotation4/"
+        - "/bags/"             # owned by the `bags` session (reverse direction)
+        - ".DS_Store"
+        - "/mutagen.yml.lock"  # this daemon's own runtime lock (Mac-only)
+
+  # Rosbags: Pi (alpha) -> Mac (beta). Scoped to the bags dir only; syncs the
+  # recording files (no *.mcap ignore here) so they land on the Mac for playback.
+  bags:
+    alpha: "followme-pi:follow-me-car-ros2/bags"
+    beta: "bags"
+    ignore:
+      vcs: true
+      paths:
+        - ".DS_Store"

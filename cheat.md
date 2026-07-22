@@ -2,9 +2,15 @@
 
 ## Purpose
 
-Commands that work today for building, running, and inspecting the stack. Add to this as you go.
+Commands for building, running, and inspecting the stack. Add to this as you go.
 
 ## Build
+
+### Mac sync, build, source, launch
+```bash
+build-launch 
+build-launch -q                       # No .msg interface rebuild. 
+```
 
 ### From scratch (fresh clone / clean checkout)
 ```bash
@@ -18,11 +24,20 @@ source install/setup.bash              # overlay: makes our packages + msgs visi
 
 ### Run
 ```bash
-# Whole stack: robot_state_publisher + serial_bridge + pose_estimator + foxglove_bridge
+# Whole stack: robot_state_publisher + serial_bridge + estimators + mode_manager +
+# nav_controller + foxglove_bridge
 ros2 launch follow_me_nodes bringup.launch.py 
 ros2 launch follow_me_nodes bringup.launch.py namespace:=fmbot    
 ros2 launch follow_me_nodes bringup.launch.py foxglove:=false     # bridge already running
-ros2 launch follow_me_nodes bringup.launch.py follow:=true        # also start nav_controller (DRIVES THE CAR)
+```
+
+> nav_controller + mode_manager always launch now (`follow:=true` is gone). The stack
+> boots into nav_mode "follow" — nav_controller DRIVES THE CAR once it has a trusted tag
+> fix. Park it with the dashboard's nav-mode buttons or:
+```bash
+ros2 service call /fmbot/set_nav_mode follow_me_interfaces/srv/SetNavMode "{mode: stopped}"
+ros2 service call /fmbot/set_nav_mode follow_me_interfaces/srv/SetNavMode "{mode: follow}"
+ros2 topic echo /fmbot/nav_mode          # latched: prints the current mode immediately
 ```
 
 ```bash
@@ -33,11 +48,15 @@ ros2 run follow_me_nodes serial_bridge
 ros2 run follow_me_nodes pose_estimator                      # separate terminal
 ros2 run follow_me_nodes serial_bridge --ros-args -r __ns:=/fmbot      # -> /fmbot/uwb/raw
 
-# Follow controller (fused/tag_pose + odom -> cmd_drive, broadcasts nav_goal). DRIVES THE CAR.
-# In bringup behind follow:=true (default off); or run by hand — but MATCH THE NAMESPACE (-r __ns:=/fmbot)
-# or its topics won't connect to the /fmbot stack. New entry point => needs a colcon build once.
+# Follow controller (fused/tag_pose + odom -> cmd_drive, broadcasts nav_goal). DRIVES THE CAR
+# while nav_mode == "follow" (idle otherwise). Run by hand — but MATCH THE NAMESPACE
+# (-r __ns:=/fmbot) or its topics won't connect to the /fmbot stack.
 ros2 run follow_me_nodes nav_controller --ros-args -r __ns:=/fmbot
 ros2 run follow_me_nodes nav_controller --ros-args -r __ns:=/fmbot -p cruise_speed_mps:=1.34
+
+# Nav-mode owner (latched nav_mode topic + set_nav_mode service; boots to "follow").
+ros2 run follow_me_nodes mode_manager --ros-args -r __ns:=/fmbot
+ros2 run follow_me_nodes mode_manager --ros-args -r __ns:=/fmbot -p initial_mode:=stopped
 ```
 
 ### Test
@@ -99,20 +118,45 @@ ros2 bag play run1 --clock -r 0.5      # half speed
 > stamps while the ROS clock reads *now*. tf2 drops transforms outside its ~10 s buffer, so
 > the 3D panel goes empty. Same class of bug as the ESP32 device-clock offset.
 
-## Serial / ESP32
-```bash
-ls /dev/ttyUSB* /dev/ttyACM*           # find the ESP32
-pio run -e dw3000-test                 # build/flash a PlatformIO env
-pio device monitor                     # serial monitor
+## Web dashboard
 ```
+http://followme-pi.local:8080/                  # built dashboard, served from the Pi 
+http://10.0.0.223/                              # ESP Bench dash
+
+web/:npm run build 
+web/: npm run serve
+```
+
 ## Pi (host)
 ```bash
+ssh followme-pi            # get into the Pi (host alias from ~/.ssh/config)
 sudo shutdown -h now       # graceful power-off (stops services, unmounts SD) — same as `sudo poweroff`
 sudo shutdown -h +5        # power off in 5 min; `sudo shutdown -c` cancels a pending one
 sudo reboot                # graceful restart
 ```
 > Wait for the green ACT LED to stop blinking before pulling power — the command returns
 > before the write cache flushes, and early power-cut is the usual cause of SD-card corruption.
+
+## Dev sync (mutagen)
+Runs on the **Mac**, from the repo root. Config lives in `mutagen.yml`. Two one-way
+sessions: `fmcar` (source, Mac → Pi) and `bags` (recordings, Pi → Mac).
+```bash
+mutagen project start          # spin up both sessions (auto-starts the daemon)
+mutagen sync list              # status — healthy = "Watching for changes"
+mutagen sync monitor fmcar     # live activity for one session
+mutagen sync flush             # force an immediate sync (don't wait for the file watcher)
+mutagen project pause          # stop syncing, keep the sessions
+mutagen project resume
+mutagen project terminate      # tear the sessions down
+```
+> **Pi reboot:** nothing to do. The daemon (on the Mac) auto-reconnects and re-launches
+> the Pi agent over SSH once the Pi is back; sessions return to "Watching" on their own.
+> **Mac reboot:** the daemon stops — run any `mutagen` command to wake it (sessions persist).
+> `mutagen daemon register` makes the daemon auto-start on login so even that's hands-off.
+
+> `fmcar` is Mac-authoritative: Mac edits (incl. deletions) propagate to the Pi; Pi edits
+> are never pushed back (conflicts are flagged, not clobbered). `bags` is a **mirror** —
+> deleting a bag on the Pi also removes the Mac copy. Record bags into `~/follow-me-car-ros2/bags/`.
 
 ## Architecture
 ### Nodes
@@ -121,13 +165,14 @@ src/follow_me_nodes/follow_me_nodes/serial_bridge.py    # parses esp32 json and 
 src/follow_me_nodes/follow_me_nodes/pose_estimator.py   # imu heading + wheel odom -> 2D pose
 src/follow_me_nodes/follow_me_nodes/tag_broadcaster.py  # uwb/raw bearing+dist -> uwb_link->tag_link tf
 src/follow_me_nodes/follow_me_nodes/tag_estimator.py    # EKF: uwb/raw+pan+odom -> fused/tag_pose
-src/follow_me_nodes/follow_me_nodes/nav_controller.py   # latched-goal follow-me: tag+odom -> cmd_drive, nav_goal
+src/follow_me_nodes/follow_me_nodes/nav_controller.py   # latched-goal follow-me: tag+odom -> cmd_drive, nav_goal (gated on nav_mode)
+src/follow_me_nodes/follow_me_nodes/mode_manager.py     # owns nav_mode: latched topic + set_nav_mode service
 ```
 
 ### Description / launch
 ```
 src/follow_me_nodes/urdf/follow_me_car.urdf     # Traxxas 1/16 E-Revo, box+cylinder primitives
-src/follow_me_nodes/launch/bringup.launch.py    # RSP + serial_bridge + pose_estimator + tag_broadcaster + tag_estimator + foxglove; + nav_controller when follow:=true (default off)
+src/follow_me_nodes/launch/bringup.launch.py    # RSP + serial_bridge + pose_estimator + tag_broadcaster + tag_estimator + mode_manager + nav_controller + foxglove (boots into nav_mode "follow")
 ```
 
 ### TF tree
@@ -146,13 +191,17 @@ base_link -> {chassis,body,4x wheel}_link   robot_state_publisher, /tf_static
 src/follow_me_interfaces/msg/ActuatorStatus.msg   # live actuator outputs: throttle/steering/pan
 src/follow_me_interfaces/msg/CommandStatus.msg    # control mode + last accepted command echo
 src/follow_me_interfaces/msg/DriveCommand.msg     # drive setpoint: speed + heading
+src/follow_me_interfaces/msg/NavMode.msg          # active Pi-side nav policy (latched)
+src/follow_me_interfaces/msg/SensorHealth.msg     # per-sensor Hz from ESP32 health frames (~1-2 Hz)
 src/follow_me_interfaces/msg/UwbRaw.msg           # DW3000 range/bearing to tag
 src/follow_me_interfaces/msg/WheelState.msg       # fused speed, odometer distance, cogging flag
+src/follow_me_interfaces/srv/SetNavMode.srv       # gated nav_mode switch (mode_manager)
 ```
 
 ### Docs (source of truth)
 ```
-PROJECT_PLAN.md   # goals, architecture, serial protocol, phased plan. Authoritative for specs.
+interface.md      # SOT for the ESP32 <-> Pi serial contract: telemetry + commands + event frames.
+PROJECT_PLAN.md   # goals, architecture, control-loop placement, phased plan. Authoritative for specs.
 NOTES.md          # running state: focus, build log, hardware validation, open questions. Authoritative for current state.
 cheat.md          # this file — commands.
 ```

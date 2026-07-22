@@ -2,23 +2,34 @@
 """nav_controller: latched-goal follow-me — fused tag + odom -> cmd_drive, broadcasts nav_goal.
 Commits the tag as a point in odom and steers to it; on high bearing uncertainty it HOLDs
 (freezes the goal, keeps driving to the last trusted point) until a streak of good fixes.
-"""
+Drives only while mode_manager's latched nav_mode matches the active_mode param."""
 
 import math
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from tf2_ros import TransformBroadcaster
 
-from follow_me_interfaces.msg import DriveCommand, TagEstimate
+from follow_me_interfaces.msg import DriveCommand, NavMode, TagEstimate
 
 # Inputs and output — RELATIVE names, namespaced per robot at launch.
 TOPIC_TAG_POSE = "fused/tag_pose"
 TOPIC_ODOM = "odom"
 TOPIC_CMD_DRIVE = "cmd_drive"
+TOPIC_NAV_MODE = "nav_mode"
+
+ACTIVE_MODE = "follow"     # the nav_mode this policy implements; other policies = other nodes
+
+# Must match mode_manager's latched publisher QoS or the boot-time mode is missed.
+LATCHED_QOS = QoSProfile(
+    depth=1,
+    reliability=QoSReliabilityPolicy.RELIABLE,
+    durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+)
 
 # --- Follow tuning (all exposed as ROS params; these are the defaults) ---
 MPH_TO_MPS = 0.44704       # exact by definition; the stack is SI downstream of the bridge
@@ -57,8 +68,10 @@ class NavController(Node):
             self.declare_parameter("bearing_sigma_low_deg", BEARING_SIGMA_LOW_DEG).value)
         self.reacquire_count = self.declare_parameter(
             "reacquire_count", REACQUIRE_COUNT).value
+        self.active_mode = self.declare_parameter("active_mode", ACTIVE_MODE).value
 
         # Follow state.
+        self._active = False    # True only while nav_mode == active_mode; no driving until then
         self._car = None        # (x, y, yaw) in odom, latest — from /odom
         self._goal = None       # (x, y) committed goal in odom; None until the first trusted fix
         self._holding = False   # True = HOLD: bearing uncertainty too high, goal frozen
@@ -69,12 +82,33 @@ class NavController(Node):
         self.sub_tag = self.create_subscription(
             TagEstimate, TOPIC_TAG_POSE, self._on_tag_pose, 10)
         self.sub_odom = self.create_subscription(Odometry, TOPIC_ODOM, self._on_odom, 10)
+        self.sub_mode = self.create_subscription(
+            NavMode, TOPIC_NAV_MODE, self._on_nav_mode, LATCHED_QOS)
 
         self.get_logger().info(
             f"nav_controller up; latched follow '{TOPIC_TAG_POSE}' + '{TOPIC_ODOM}' -> "
             f"'{TOPIC_CMD_DRIVE}' (standoff {self.follow_distance:.2f} m, "
-            f"cruise {self.cruise_speed:.2f} m/s, HOLD > {math.degrees(self.sigma_high):.0f} deg)"
+            f"cruise {self.cruise_speed:.2f} m/s, HOLD > {math.degrees(self.sigma_high):.0f} deg; "
+            f"idle until nav_mode == '{self.active_mode}')"
         )
+
+    def _on_nav_mode(self, msg):
+        """Gate driving on the shared nav_mode; safe-stop and reset state on deactivation."""
+        was_active = self._active
+        self._active = (msg.mode == self.active_mode)
+        if was_active and not self._active:
+            # One-shot commanded stop at the current heading, then go cmd-silent: the
+            # bridge's 500 ms staleness gate stops TX and the ESP32's failsafe cuts
+            # throttle as backstops. Clear the goal so re-entry starts in acquisition.
+            if self._car is not None:
+                self._publish(0.0, self._car[2])
+            self._goal = None
+            self._holding = False
+            self._good_streak = 0
+            self.get_logger().info(
+                f"nav_mode '{msg.mode}' != '{self.active_mode}': follow disabled")
+        elif not was_active and self._active:
+            self.get_logger().info(f"nav_mode '{msg.mode}': follow enabled (acquisition)")
 
     def _on_odom(self, msg):
         """Cache the latest car pose in odom (x, y, yaw) for goal placement and pursuit."""
@@ -84,6 +118,8 @@ class NavController(Node):
 
     def _on_tag_pose(self, msg):
         """Update the committed goal under the trust gate, then drive toward it."""
+        if not self._active:
+            return  # another nav_mode owns the car; stay cmd-silent
         if self._car is None:
             return  # no odom yet; can't place the goal or pursue (bridge failsafe covers it)
 

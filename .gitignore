@@ -23,3 +23,12 @@ frames_*.pdf
 CLAUDE.md
 .claude/
 BUILD_LOG.md
+
+# mutagen runtime lock (created by `mutagen project start`)
+mutagen.yml.lock
+
+# rosbag recordings (synced Pi -> Mac by the mutagen `bags` session)
+bags/
+
+# macOS
+.DS_Store

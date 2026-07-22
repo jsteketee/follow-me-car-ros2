@@ -1,0 +1,7 @@
+# Request a nav_mode change. mode_manager gates entry (unknown mode, unmet car
+# conditions) and answers accepted=false with a reason instead of switching.
+# The new mode is announced on the latched nav_mode topic, not in this response.
+string mode           # requested navigation mode, e.g. "follow", "stopped"
+---
+bool accepted         # true = mode is now active (or already was)
+string message        # rejection reason, or an echo of the accepted transition

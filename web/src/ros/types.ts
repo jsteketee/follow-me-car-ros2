@@ -30,10 +30,40 @@ export type TagEstimate = {
 
 // follow_me_interfaces/msg/CommandStatus — echo of the ESP32's accepted command + mode.
 export type CommandStatus = {
-  mode: string;        // "SETPOINT" | "DIRECT" | "STOPPED"
-  cmd_speed: number;   // m/s
-  cmd_heading: number; // rad, odom frame
-  cmd_pan: number;     // rad
-  cmd_age_ms: number;  // ms since last accepted setpoint; -1 = none
-  cmd_rejects: number; // monotonic reject counter
+  command_mode: string; // ESP32 control mode: "SETPOINT" | "DIRECT" | "STOPPED"
+  cmd_speed: number;    // m/s
+  cmd_heading: number;  // rad, odom frame
+  cmd_pan: number;      // rad
+  cmd_age_ms: number;   // ms since last accepted setpoint; -1 = none
+  cmd_rejects: number;  // monotonic reject counter
+};
+
+// follow_me_interfaces/msg/NavMode — the active Pi-side navigation policy (latched).
+export type NavMode = {
+  mode: string;  // "follow" | "stopped" | future policies
+};
+
+// follow_me_interfaces/srv/SetNavMode response.
+export type SetNavModeResponse = {
+  accepted: boolean;
+  message: string;  // rejection reason or transition echo
+};
+
+// follow_me_interfaces/msg/SensorHealth — per-sensor update rates from ESP32 health frames.
+export type SensorHealthMsg = {
+  names: string[];          // sensor keys: "imu", "uwb", "loop", ...
+  rates_hz: number[];       // Hz per sensor, index-matched; 0 = silent
+  max_loop_us: number;      // worst control-loop gap since last frame (us); 0 = not reported
+  telem_frames_1s: number;  // Pi-parsed telemetry frames in the last 1 s (received rate)
+};
+
+// rcl_interfaces/msg/Log — one /rosout record from any ROS2 node.
+export type RosoutLog = {
+  stamp: { sec: number; nanosec: number };
+  level: number;     // DEBUG=10 INFO=20 WARN=30 ERROR=40 FATAL=50
+  name: string;      // logger (node) name
+  msg: string;
+  file: string;
+  function: string;
+  line: number;
 };

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """bringup.launch.py — launch the full car stack (state publisher, serial bridge,
-estimators, optional foxglove). Args: namespace, foxglove, serial_port."""
+estimators, mode_manager, nav_controller, optional foxglove). Boots into nav_mode
+"follow"; switch via the set_nav_mode service. Args: namespace, foxglove, serial_port."""
 
 import os
 
@@ -27,7 +28,6 @@ def generate_launch_description():
 
     namespace = LaunchConfiguration("namespace")
     foxglove = LaunchConfiguration("foxglove")
-    follow = LaunchConfiguration("follow")
     serial_port = LaunchConfiguration("serial_port")
 
     return LaunchDescription([
@@ -38,10 +38,6 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "foxglove", default_value="true",
             description="Also start foxglove_bridge.",
-        ),
-        DeclareLaunchArgument(
-            "follow", default_value="false",
-            description="Also start nav_controller — it publishes cmd_drive and DRIVES the car.",
         ),
         DeclareLaunchArgument(
             "serial_port", default_value=DEFAULT_PORT,
@@ -91,14 +87,22 @@ def generate_launch_description():
             output="screen",
         ),
 
-        # Off by default (follow:=true): publishes cmd_drive and will drive the car.
+        # Owns nav_mode (boots latched into "follow") and hosts set_nav_mode.
+        Node(
+            package="follow_me_nodes",
+            executable="mode_manager",
+            name="mode_manager",
+            namespace=namespace,
+            output="screen",
+        ),
+
+        # Always launched; drives (publishes cmd_drive) only while nav_mode == "follow".
         Node(
             package="follow_me_nodes",
             executable="nav_controller",
             name="nav_controller",
             namespace=namespace,
             output="screen",
-            condition=IfCondition(follow),
         ),
 
         # Not namespaced: the bridge serves the whole graph regardless of robot.

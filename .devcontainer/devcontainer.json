@@ -1,0 +1,49 @@
+{
+  "name": "follow-me-car-ros2 (Jazzy)",
+  "build": { "dockerfile": "Dockerfile" },
+  "workspaceFolder": "/workspaces/follow-me-car-ros2",
+
+  // Give the container its OWN Claude Code config in a persistent, isolated Docker
+  // volume: an independent login that survives rebuilds and can neither race nor
+  // corrupt the Mac's host auth. Run `claude` once inside the container to log in.
+  "mounts": [
+    "source=followme-car-ros2-claude-config,target=/root/.claude,type=volume",
+    // Share the Mac's global preferences read-only (comment style, git, python3, etc.).
+    // Read-only + user-authored, so it can't be corrupted or raced like the old setup.
+    "source=${localEnv:HOME}/.claude/CLAUDE.md,target=/root/.claude/CLAUDE.md,type=bind,readonly"
+  ],
+
+  // Keep all Claude Code state (credentials + config) inside the volume above,
+  // rather than at the default ~/.claude.json which would live outside it.
+  "remoteEnv": {
+    "CLAUDE_CONFIG_DIR": "/root/.claude"
+  },
+
+  // Install workspace deps from package.xml, then build once (symlink-install so
+  // Python edits take effect without a rebuild). Runs after the repo is mounted.
+  "postCreateCommand": "rosdep update && rosdep install --from-paths src --ignore-src -y && colcon build --symlink-install",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-iot.vscode-ros"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/bin/python3",
+        // Let Pylance resolve rclpy, message types, and the generated interfaces.
+        "python.analysis.extraPaths": [
+          "/opt/ros/jazzy/lib/python3.12/site-packages",
+          "install/follow_me_nodes/lib/python3.12/site-packages",
+          "install/follow_me_interfaces/local/lib/python3.12/dist-packages"
+        ],
+        "python.autoComplete.extraPaths": [
+          "/opt/ros/jazzy/lib/python3.12/site-packages",
+          "install/follow_me_nodes/lib/python3.12/site-packages",
+          "install/follow_me_interfaces/local/lib/python3.12/dist-packages"
+        ]
+      }
+    }
+  }
+}

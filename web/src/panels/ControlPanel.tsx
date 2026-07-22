@@ -1,12 +1,14 @@
-// Horizontal metrics strip across the top: connection, ESP32 mode (read-only), command
-// health, steering, UWB angles, tag range, and tag 1-sigma uncertainty (color-graded bars).
-// Wraps to multiple rows on narrow / mobile viewports. Polls the shared live refs at 5 Hz.
+// Horizontal metrics strip across the top: nav-mode selector (calls set_nav_mode),
+// command health, steering, UWB angles, tag range, and tag 1-sigma uncertainty
+// (color-graded bars). Polls the shared live refs at 5 Hz.
 import { useEffect, useState, CSSProperties } from "react";
-import { useConnStatus } from "../ros/foxglove";
+import { useCallService } from "../ros/foxglove";
 import { useLive } from "../ros/live";
+import { ns } from "../ros/topics";
+import { SetNavModeResponse } from "../ros/types";
 import { resolve } from "../ros/tf2d";
 
-const MODES = ["SETPOINT", "DIRECT", "STOPPED"];
+const NAV_MODES = ["follow", "stopped"];  // extend as new policies land
 const DEG = 180 / Math.PI;
 const RANGE_SIGMA_MAX = 0.5;       // m — full bar (reasonable default)
 const BEARING_SIGMA_MAX_DEG = 20;  // deg — full bar
@@ -21,20 +23,35 @@ function sigColor(t: number): string {
 }
 
 type Snap = {
-  mode: string; cmdAgeMs: number; cmdRejects: number; cmdSpeed: number;
+  navMode: string; hasNavMode: boolean;
+  cmdAgeMs: number; cmdRejects: number; cmdSpeed: number;
   steering: number; hasStatus: boolean; hasCmd: boolean;
   panDeg: number | null; uwbBearingDeg: number | null; tagDist: number | null;
   rangeSigma: number; bearingSigmaDeg: number; coasting: boolean; hasTagEst: boolean;
 };
 
 export function ControlPanel() {
-  const status = useConnStatus();
+  const callService = useCallService();
   const { treeRef, statusRef } = useLive();
   const [s, setS] = useState<Snap>({
-    mode: "", cmdAgeMs: -1, cmdRejects: 0, cmdSpeed: 0, steering: 0,
+    navMode: "", hasNavMode: false,
+    cmdAgeMs: -1, cmdRejects: 0, cmdSpeed: 0, steering: 0,
     hasStatus: false, hasCmd: false, panDeg: null, uwbBearingDeg: null, tagDist: null,
     rangeSigma: 0, bearingSigmaDeg: 0, coasting: false, hasTagEst: false,
   });
+  const [pendingMode, setPendingMode] = useState<string | null>(null);
+  const [modeErr, setModeErr] = useState("");
+
+  // Request a nav_mode switch; the active highlight follows the echoed nav_mode topic.
+  const setNavMode = (m: string) => {
+    if (pendingMode !== null || m === s.navMode) return;
+    setPendingMode(m);
+    setModeErr("");
+    callService(ns("set_nav_mode"), { mode: m })
+      .then((r: SetNavModeResponse) => { if (!r.accepted) setModeErr(r.message); })
+      .catch((e) => setModeErr(String(e?.message ?? e)))
+      .finally(() => setPendingMode(null));
+  };
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -51,7 +68,8 @@ export function ControlPanel() {
         uwbBearingDeg = Math.atan2(sn * dx + c * dy, c * dx - sn * dy) * DEG;
       }
       setS({
-        mode: st.mode, cmdAgeMs: st.cmdAgeMs, cmdRejects: st.cmdRejects, cmdSpeed: st.cmdSpeed,
+        navMode: st.navMode, hasNavMode: st.hasNavMode,
+        cmdAgeMs: st.cmdAgeMs, cmdRejects: st.cmdRejects, cmdSpeed: st.cmdSpeed,
         steering: st.steering, hasStatus: st.hasStatus, hasCmd: st.hasCmd,
         panDeg: st.hasStatus ? st.pan * DEG : null, uwbBearingDeg, tagDist,
         rangeSigma: st.tagRangeSigma, bearingSigmaDeg: st.tagBearingSigma * DEG,
@@ -67,21 +85,26 @@ export function ControlPanel() {
 
   return (
     <>
-    {/* Mode selector on its own row — display-only for now; will accept input once a
-        mode-set path exists (see PROJECT_PLAN: the ESP32 dashboard is the mode authority). */}
+    {/* Nav-mode selector: calls set_nav_mode; the highlight tracks the echoed nav_mode
+        topic, so a rejected or failed switch never shows as active. */}
     <div className="moderow">
-      <span className="mlabel">mode</span>
+      <span className="mlabel">nav mode</span>
       <div className="modebtns">
-        {MODES.map((m) => <span key={m} className={`modebtn ${s.mode === m ? "active" : ""}`}>{m}</span>)}
+        {NAV_MODES.map((m) => (
+          <button
+            key={m}
+            className={`modebtn ${s.hasNavMode && s.navMode === m ? "active" : ""} ${pendingMode === m ? "pending" : ""}`}
+            disabled={pendingMode !== null}
+            onClick={() => setNavMode(m)}
+          >
+            {m}
+          </button>
+        ))}
       </div>
+      {modeErr && <span className="mval warn">{modeErr}</span>}
     </div>
 
     <div className="metrics">
-      <div className="metric">
-        <span className="mlabel">link</span>
-        <span className="mval"><span className={`dot ${status}`} />{status}</span>
-      </div>
-
       <Metric label="cmd age" value={s.hasCmd && s.cmdAgeMs >= 0 ? `${s.cmdAgeMs} ms` : "—"} warn={failsafe} />
       <Metric label="rejects" value={s.hasCmd ? String(s.cmdRejects) : "—"} warn={s.hasCmd && s.cmdRejects > 0} />
       <Metric label="cmd spd" value={s.hasCmd ? `${s.cmdSpeed.toFixed(2)} m/s` : "—"} />

@@ -20,8 +20,6 @@ Subscribes:
 
 Publishes:
   fused/tag_pose   follow_me_interfaces/TagEstimate  20 Hz filtered range/bearings/sigmas
-  display/flag     follow_me_interfaces/DisplayFlag  "Cal" raised while calibrating latency,
-                                                     cleared (-1) once it converges
 
 Broadcasts:
   base_link -> tag_est_link on /tf, per publish tick — the FILTERED tag for
@@ -39,14 +37,12 @@ from rclpy.node import Node
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from tf2_ros import TransformBroadcaster
-from follow_me_interfaces.msg import ActuatorStatus, DisplayFlag, TagEstimate, UwbRaw
+from follow_me_interfaces.msg import ActuatorStatus, TagEstimate, UwbRaw
 
 TOPIC_UWB_RAW = "uwb/raw"
 TOPIC_ACTUATOR_STATUS = "actuator/status"
 TOPIC_ODOM = "odom"
 TOPIC_FUSED_TAG_POSE = "fused/tag_pose"
-TOPIC_DISPLAY_FLAG = "display/flag"
-CAL_FLAG_TEXT = "Cal"        # display flag raised while latency calibration is in progress
 
 # --- Tuning ---
 RANGE_SIGMA_M = 0.10         # 1-sigma DW3000 ranging error (URDF notes "<10 cm")
@@ -112,7 +108,6 @@ class TagEstimator(Node):
         self._lat_sww = 0.0           # Sum(omega^2) in the current window
         self._lat_swn = 0.0           # Sum(omega * nu_b) in the current window
         self._lat_n = 0               # rotating-sample count in the current window
-        self._cal_announced = False   # True once the "Cal" display flag has been raised
 
         # Filter state: tag position in `odom` and its 2x2 covariance (symmetric,
         # stored as pxx/pxy/pyy). None until the first accepted fix initializes it.
@@ -130,8 +125,6 @@ class TagEstimator(Node):
         )
         self.sub_odom = self.create_subscription(Odometry, TOPIC_ODOM, self._on_odom, 10)
         self.pub_fused = self.create_publisher(TagEstimate, TOPIC_FUSED_TAG_POSE, 10)
-        # Raises/clears the "Cal" display flag over the latency-calibration lifecycle.
-        self.pub_flag = self.create_publisher(DisplayFlag, TOPIC_DISPLAY_FLAG, 10)
         # Broadcasts base_link -> tag_est_link only; the raw uwb_link -> tag_link edge
         # belongs to tag_broadcaster.
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -185,7 +178,6 @@ class TagEstimator(Node):
         self._latency_ns += int(LATENCY_GAIN * residual_s * 1e9)
         cap = LATENCY_MAX_MS * 1_000_000
         self._latency_ns = max(-cap, min(cap, self._latency_ns))
-        first_convergence = not self._lat_confident
         self._lat_confident = True
         self._lat_sww = self._lat_swn = 0.0
         self._lat_n = 0
@@ -193,16 +185,6 @@ class TagEstimator(Node):
             f"UWB-IMU latency -> {self._latency_ns / 1e6:+.0f} ms "
             f"(window residual {residual_s * 1e3:+.0f} ms)"
         )
-        if first_convergence:
-            self._send_flag(CAL_FLAG_TEXT, -1)  # calibration done -> clear the flag
-
-    def _send_flag(self, text, action):
-        """Publish a display-flag add(+1)/remove(-1) event on display/flag."""
-        f = DisplayFlag()
-        f.header.stamp = self.get_clock().now().to_msg()
-        f.text = text
-        f.action = int(action)
-        self.pub_flag.publish(f)
 
     def _bearing_var(self, bearing):
         """Angle-inflated bearing measurement variance: PDoA degrades off boresight."""
@@ -266,9 +248,6 @@ class TagEstimator(Node):
                 f"initialized tag at ({tx:+.2f}, {ty:+.2f}) m from first fix "
                 f"(d={msg.distance:.2f} m)"
             )
-            if not self._cal_announced:
-                self._cal_announced = True
-                self._send_flag(CAL_FLAG_TEXT, 1)  # latency calibration in progress
             return
 
         self._predict_to(fix_ns)

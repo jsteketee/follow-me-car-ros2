@@ -1,13 +1,23 @@
 // Foxglove ws-protocol connection to foxglove_bridge: one WebSocket, topic subscribe with
-// on-the-fly CDR decode (schema parsed from the channel advert). Exposes a subscribe hook.
+// on-the-fly CDR decode (schema parsed from the channel advert), and ROS service calls
+// (CDR-encoded from the service advert's schema). Exposes subscribe + callService hooks.
 import { createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode } from "react";
 import { FoxgloveClient } from "@foxglove/ws-protocol";
 import { parse as parseRos2 } from "@foxglove/rosmsg";
-import { MessageReader } from "@foxglove/rosmsg2-serialization";
+import { MessageReader, MessageWriter } from "@foxglove/rosmsg2-serialization";
 
 export type ConnStatus = "connecting" | "connected" | "disconnected";
 type MsgCb = (msg: any) => void;
 type Unsub = () => void;
+type CallService = (name: string, request: any) => Promise<any>;
+type PendingCall = {
+  svc: any;
+  resolve: (v: any) => void;
+  reject: (e: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+const SERVICE_CALL_TIMEOUT_MS = 3000;
 
 // Offer both handshake tokens: the new Rust SDK bridge (libfoxglove.so) requires
 // "foxglove.sdk.v1" and rejects the classic token; older foxglove_bridge wants the classic
@@ -16,6 +26,7 @@ const SUBPROTOCOLS = ["foxglove.sdk.v1", FoxgloveClient.SUPPORTED_SUBPROTOCOL];
 
 const SubscribeCtx = createContext<(topic: string, cb: MsgCb) => Unsub>(() => () => {});
 const StatusCtx = createContext<ConnStatus>("disconnected");
+const CallServiceCtx = createContext<CallService>(() => Promise.reject(new Error("no bridge")));
 
 // Resolve the bridge WebSocket URL: ?bridge= query, then VITE_BRIDGE_URL, else this host:8765.
 export function bridgeUrl(): string {
@@ -38,6 +49,10 @@ export function FoxgloveProvider({ children }: { children: ReactNode }) {
   const readerByChannel = useRef<Map<number, MessageReader>>(new Map());
   const subIdToTopic = useRef<Map<number, string>>(new Map());
   const activeSubByTopic = useRef<Map<string, number>>(new Map());
+  // Service-call state: adverts by name, in-flight calls by callId.
+  const servicesByName = useRef<Map<string, any>>(new Map());
+  const pendingCalls = useRef<Map<number, PendingCall>>(new Map());
+  const nextCallId = useRef(1);
 
   // Subscribe to a topic on the wire once its channel is advertised (idempotent).
   const wireSubscribe = useCallback((topic: string) => {
@@ -47,6 +62,30 @@ export function FoxgloveProvider({ children }: { children: ReactNode }) {
     const subId = clientRef.current.subscribe(ch.id);
     activeSubByTopic.current.set(topic, subId);
     subIdToTopic.current.set(subId, topic);
+  }, []);
+
+  // Call a ROS service by name: CDR-encode the request from the advertised schema,
+  // resolve with the decoded response (or reject on timeout/disconnect/no advert).
+  const callService = useCallback((name: string, request: any): Promise<any> => {
+    const client = clientRef.current;
+    const svc = servicesByName.current.get(name);
+    if (!client || !svc) return Promise.reject(new Error(`service not advertised: ${name}`));
+    let data: Uint8Array;
+    try {
+      const writer = new MessageWriter(parseRos2(svc.request?.schema ?? svc.requestSchema, { ros2: true }));
+      data = writer.writeMessage(request);
+    } catch (e) {
+      return Promise.reject(new Error(`request encode failed for ${name}: ${e}`));
+    }
+    const callId = nextCallId.current++;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingCalls.current.delete(callId);
+        reject(new Error(`service call timed out: ${name}`));
+      }, SERVICE_CALL_TIMEOUT_MS);
+      pendingCalls.current.set(callId, { svc, resolve, reject, timer });
+      client.sendServiceCallRequest({ serviceId: svc.id, callId, encoding: "cdr", data });
+    });
   }, []);
 
   // Stable public subscribe: register the callback, bind the wire subscription if possible.
@@ -81,8 +120,36 @@ export function FoxgloveProvider({ children }: { children: ReactNode }) {
         readerByChannel.current.clear();
         subIdToTopic.current.clear();
         activeSubByTopic.current.clear();
+        servicesByName.current.clear();
+        for (const p of pendingCalls.current.values()) {
+          clearTimeout(p.timer);
+          p.reject(new Error("bridge disconnected"));
+        }
+        pendingCalls.current.clear();
         clientRef.current = null;
         retry = setTimeout(connect, 1500);
+      });
+
+      client.on("advertiseServices", (svcs: any[]) => {
+        for (const s of svcs) servicesByName.current.set(s.name, s);
+      });
+
+      client.on("unadvertiseServices", (ids: number[]) => {
+        for (const [n, s] of servicesByName.current) if (ids.includes(s.id)) servicesByName.current.delete(n);
+      });
+
+      // Decode a service response with the advert's response schema, settle the pending call.
+      client.on("serviceCallResponse", (res: any) => {
+        const p = pendingCalls.current.get(res.callId);
+        if (!p) return;
+        pendingCalls.current.delete(res.callId);
+        clearTimeout(p.timer);
+        try {
+          const defs = parseRos2(p.svc.response?.schema ?? p.svc.responseSchema, { ros2: true });
+          p.resolve(new MessageReader(defs).readMessage(res.data));
+        } catch (e) {
+          p.reject(new Error(`response decode failed: ${e}`));
+        }
       });
 
       // Each advertised channel carries its schema text; build a CDR reader from it.
@@ -128,9 +195,16 @@ export function FoxgloveProvider({ children }: { children: ReactNode }) {
 
   return (
     <StatusCtx.Provider value={status}>
-      <SubscribeCtx.Provider value={subscribe}>{children}</SubscribeCtx.Provider>
+      <CallServiceCtx.Provider value={callService}>
+        <SubscribeCtx.Provider value={subscribe}>{children}</SubscribeCtx.Provider>
+      </CallServiceCtx.Provider>
     </StatusCtx.Provider>
   );
+}
+
+// Call a ROS service through the bridge: useCallService()(name, request) -> Promise<response>.
+export function useCallService(): CallService {
+  return useContext(CallServiceCtx);
 }
 
 // Subscribe to a ROS topic for the component's lifetime; the latest callback is always used.
