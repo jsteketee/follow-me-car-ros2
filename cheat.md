@@ -134,6 +134,20 @@ ros2 bag play run1 --clock -r 0.5      # half speed
 > stamps while the ROS clock reads *now*. tf2 drops transforms outside its ~10 s buffer, so
 > the 3D panel goes empty. Same class of bug as the ESP32 device-clock offset.
 
+### Health benchmark (performance-benchmark.sh)
+Records a fixed window of the health topics (`pi_health` + `sensor_health`) into a dated bag
+under `bags/performance-benchmark/`, then prints and saves each field's average + max over the
+run as `<bag-name>-report.csv` beside the bag. Run with the stack up so the topics are live.
+```bash
+./performance-benchmark.sh                     # record 30 s, then report
+DURATION_S=60 ./performance-benchmark.sh       # override the window (seconds)
+./performance-benchmark.sh bags/performance-benchmark/performance-benchmark_YYYYMMDD_HHMMSS
+                                               # existing bag: skip recording, just (re)build its report
+```
+> Needs the workspace built with the `PiHealth` msg (`build-launch`, not a stale `install/`).
+> SensorHealth's per-sensor rates report as `rates_hz[imu]`, `rates_hz[uwb]`, …; a `0 messages`
+> report means nothing was publishing.
+
 ## Web dashboard
 ```
 http://followme-pi.local:8080/                  # built dashboard, served from the Pi 
