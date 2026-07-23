@@ -50,6 +50,12 @@ TOPIC_SENSOR_HEALTH = "sensor_health"
 # Max chars of an offending serial line to echo into a warning (bounds log spam).
 LOG_SNIPPET_CHARS = 120
 
+# Forward telemetry seq jump beyond this is treated as a glitch/reboot, not real loss (not counted).
+SEQ_GAP_MAX = 10000
+
+# Cap on the serial reassembly buffer; a partial line larger than this (no newline) is dropped.
+SERIAL_BUF_MAX = 8192
+
 # Subscribed (relative): drive setpoints in, odom for the outbound heading offset.
 TOPIC_CMD_DRIVE = "cmd_drive"
 TOPIC_ODOM = "odom"
@@ -167,6 +173,15 @@ class SerialBridge(Node):
         # to a 1 s sliding window. Reader-thread-local -> no lock; reported on sensor_health.
         self._telem_stamps = deque()
 
+        # Link-health counters, all reader-thread-local (mutated in the reader thread, emitted
+        # from _handle_health_frame on that same thread) -> no lock. Cumulative since boot except
+        # _max_gap_ns_window, which is windowed and reset on each health emit.
+        self._last_seq = None          # last telemetry "seq" seen; None until the first frame
+        self._seq_gaps = 0             # missing sequence numbers (dropped/lost telemetry frames)
+        self._parse_fail_count = 0     # unparseable / field-coercion-dropped telemetry lines
+        self._last_frame_ns = None     # arrival ns of the previous telemetry frame
+        self._max_gap_ns_window = 0    # largest inter-frame gap since the last health emit
+
         # Frame "type" values seen but not understood — each warns once, then drops.
         self._unknown_frame_types = set()
 
@@ -204,7 +219,7 @@ class SerialBridge(Node):
     def _open_port(self):
         """Open the serial port with read/write timeouts (test seam: monkeypatched)."""
         return serial.serial_for_url(
-            self.port, baudrate=self.baud, timeout=1.0, write_timeout=0.1
+            self.port, baudrate=self.baud, timeout=0.05, write_timeout=0.1
         )
 
     def destroy_node(self):
@@ -234,6 +249,7 @@ class SerialBridge(Node):
                 # a stitch to keep wheel/state.distance continuous. Yaw is compass-absolute and
                 # needs no re-baseline (interface.md). Reader thread -> guard shared TX state.
                 self._reboot_pending = True
+                self._last_seq = None  # seq restarts at 0 on reboot; don't count the restart as a gap
                 with self._tx_lock:
                     self._latched = None
                     self._heading_offset_deg = None
@@ -267,32 +283,28 @@ class SerialBridge(Node):
             with self._ser_lock:
                 self._ser = ser
             self.get_logger().info(f"Serial open on {self.port} @ {self.baud} baud")
+            buf = bytearray()
             try:
                 while not self._stop.is_set() and rclpy.ok():
-                    raw = ser.readline()
-                    if not raw:
+                    # Bulk-drain: block for at least one byte (bounded by the port timeout), then
+                    # grab everything else already buffered in one shot. read(in_waiting) returns
+                    # instantly, so this never blocks waiting for a byte count that won't arrive.
+                    chunk = ser.read(1)
+                    if not chunk:
                         continue  # read timeout, loop to re-check shutdown
-                    line = raw.decode("utf-8", errors="replace").strip()
-                    if not line.startswith("{"):
-                        continue  # skip interleaved ESP-IDF log lines
-                    try:
-                        frame = json.loads(line)
-                    except json.JSONDecodeError:
-                        self.get_logger().warning(
-                            f"Unparseable serial line: {line[:LOG_SNIPPET_CHARS]!r}",
-                            throttle_duration_sec=2.0,
-                        )
-                        continue
-                    try:
-                        self._publish(frame)
-                    except Exception as exc:
-                        # A bad field value (e.g. null/non-numeric -> float()/int()) must not
-                        # kill the reader thread; surface it on /rosout and keep reading.
-                        self.get_logger().warning(
-                            f"Dropped telemetry frame ({type(exc).__name__}: {exc}); "
-                            f"line: {line[:LOG_SNIPPET_CHARS]!r}",
-                            throttle_duration_sec=2.0,
-                        )
+                    n = ser.in_waiting
+                    if n:
+                        chunk += ser.read(n)
+                    buf.extend(chunk)
+                    while True:
+                        nl = buf.find(b"\n")
+                        if nl < 0:
+                            break
+                        line = bytes(buf[:nl])
+                        del buf[:nl + 1]
+                        self._process_serial_line(line)
+                    if len(buf) > SERIAL_BUF_MAX:
+                        buf.clear()  # partial line past the cap with no framing: drop, resync on next '\n'
             except serial.SerialException as exc:
                 self.get_logger().warn(f"Serial error: {exc}. Reconnecting...")
             finally:
@@ -302,6 +314,32 @@ class SerialBridge(Node):
                     ser.close()
                 except Exception:
                     pass
+
+    def _process_serial_line(self, raw):
+        """Decode, filter, parse, and publish one newline-stripped serial line."""
+        line = raw.decode("utf-8", errors="replace").strip()
+        if not line.startswith("{"):
+            return  # skip interleaved ESP-IDF log lines
+        try:
+            frame = json.loads(line)
+        except json.JSONDecodeError:
+            self._parse_fail_count += 1
+            self.get_logger().warning(
+                f"Unparseable serial line: {line[:LOG_SNIPPET_CHARS]!r}",
+                throttle_duration_sec=2.0,
+            )
+            return
+        try:
+            self._publish(frame)
+        except Exception as exc:
+            # A bad field value (e.g. null/non-numeric -> float()/int()) must not
+            # kill the reader thread; surface it on /rosout and keep reading.
+            self._parse_fail_count += 1
+            self.get_logger().warning(
+                f"Dropped telemetry frame ({type(exc).__name__}: {exc}); "
+                f"line: {line[:LOG_SNIPPET_CHARS]!r}",
+                throttle_duration_sec=2.0,
+            )
 
     def _publish(self, f):
         """Dispatch one JSON frame: no "type" key = flat telemetry; typed frames branch."""
@@ -321,16 +359,23 @@ class SerialBridge(Node):
 
     def _handle_log_frame(self, f):
         """Re-log an ESP32 log event frame at its mapped severity (reaches /rosout)."""
+        # rclpy binds a severity to each logging call site (file/function/line) and raises
+        # "Logger severity cannot be changed between calls." if one site logs at more than one
+        # severity. Routing every level through a shared level_fn() makes line-N that single site,
+        # so the second distinct severity throws — each level must dispatch from its own line.
         log = self.get_logger()
-        level_fn = {
-            "debug": log.debug,
-            "info": log.info,
-            "warn": log.warning,
-            "warning": log.warning,
-            "error": log.error,
-            "fatal": log.fatal,
-        }.get(str(f.get("level", "info")).lower(), log.info)
-        level_fn(f"[esp32] {str(f.get('msg', ''))}")
+        level = str(f.get("level", "info")).lower()
+        msg = f"[esp32] {str(f.get('msg', ''))}"
+        if level == "fatal":
+            log.fatal(msg)
+        elif level == "error":
+            log.error(msg)
+        elif level in ("warn", "warning"):
+            log.warning(msg)
+        elif level == "debug":
+            log.debug(msg)
+        else:
+            log.info(msg)
 
     def _prune_telem_window(self, now_ns):
         """Drop telemetry timestamps older than the 1 s received-rate window."""
@@ -358,6 +403,17 @@ class SerialBridge(Node):
         # Pi-derived received-telemetry rate: successful telemetry frames parsed in the last 1 s.
         self._prune_telem_window(self.get_clock().now().nanoseconds)
         msg.telem_frames_1s = len(self._telem_stamps)
+        # ESP-reported cumulative telemetry TX drops (buffer full); passthrough.
+        try:
+            msg.tx_drops = int(f.get("tx_drops", 0))
+        except (TypeError, ValueError):
+            msg.tx_drops = 0
+        # Pi-derived link health: cumulative seq gaps + parse failures, and the worst inter-frame
+        # gap since the last emit (windowed -> reset here). Reader-thread-local, so no lock.
+        msg.seq_gaps = self._seq_gaps
+        msg.parse_fails = self._parse_fail_count
+        msg.max_inter_frame_gap_ms = self._max_gap_ns_window / 1e6
+        self._max_gap_ns_window = 0
         for name, rate in sensors.items():
             try:
                 msg.rates_hz.append(float(rate))
@@ -369,6 +425,19 @@ class SerialBridge(Node):
     def _publish_telemetry(self, f):
         """Convert one JSON telemetry frame to SI and publish all telemetry topics."""
         ts = f.get("ts", 0)
+
+        # Sequence-gap accounting: the ESP stamps each frame with a monotonic "seq". A forward
+        # jump > 1 means frames went missing; a backwards or oversized jump is a reboot/wrap/glitch,
+        # so resync without counting. Updated before any publish so an arrived-but-dropped frame
+        # (caught by the reader's except) counts as a parse_fail, not a gap.
+        seq = f.get("seq")
+        if seq is not None:
+            seq = int(seq)
+            if self._last_seq is not None:
+                delta = seq - self._last_seq
+                if 1 <= delta <= SEQ_GAP_MAX:
+                    self._seq_gaps += delta - 1
+            self._last_seq = seq
 
         # --- Drivetrain state (fused speed + odometer + cogging flag), converted to SI ---
         # One co-sampled message, one stamp; published before imu/data (see NOTES.md).
@@ -476,17 +545,22 @@ class SerialBridge(Node):
         # Record this frame in the 1 s received-telemetry window (last: only fully-published
         # frames count as successful).
         now_ns = self.get_clock().now().nanoseconds
+        # Track the worst gap between consecutive frames since the last health emit (jitter).
+        if self._last_frame_ns is not None:
+            self._max_gap_ns_window = max(self._max_gap_ns_window, now_ns - self._last_frame_ns)
+        self._last_frame_ns = now_ns
         self._telem_stamps.append(now_ns)
         self._prune_telem_window(now_ns)
 
     def _on_cmd_drive(self, msg):
-        """Latch the newest valid drive command. Never writes serial — the timer does."""
-        speed = msg.speed
-        heading = msg.heading
-        if not (math.isfinite(speed) and math.isfinite(heading)):
+        """Latch the newest valid drive command (SETPOINT or DIRECT). Never writes serial — the timer does."""
+        shape = int(msg.shape)
+        vals = ((msg.throttle, msg.steering, msg.pan_deg)
+                if shape == DriveCommand.DIRECT else (msg.speed, msg.heading))
+        if not all(math.isfinite(v) for v in vals):
             # Non-finite would serialize to NaN/Inf JSON and trip ESP32 validation; drop it.
             self.get_logger().warn(
-                "cmd_drive with non-finite speed/heading; ignoring.",
+                "cmd_drive with non-finite field(s); ignoring.",
                 throttle_duration_sec=1.0,
             )
             return
@@ -500,7 +574,11 @@ class SerialBridge(Node):
             stamp_ns = stamp.sec * 1_000_000_000 + stamp.nanosec
 
         with self._tx_lock:
-            self._latched = (speed, heading, stamp_ns)
+            self._latched = {
+                "shape": shape, "speed": msg.speed, "heading": msg.heading,
+                "throttle": msg.throttle, "steering": msg.steering, "pan_deg": msg.pan_deg,
+                "stamp_ns": stamp_ns,
+            }
             self._halt = False  # a fresh command re-arms TX after a reboot halt
 
     def _on_odom(self, msg):
@@ -532,32 +610,31 @@ class SerialBridge(Node):
             latched = self._latched
             offset_deg = self._heading_offset_deg
 
-        parts = []
+        if latched is None:
+            return  # no command latched yet
 
-        # Command part: only when a fresh latch AND a known heading offset exist. Staleness
-        # is silence (NOT a zero command) — that is what trips the ESP32 failsafe.
-        if latched is not None:
-            speed_mps, heading_rad, stamp_ns = latched
-            fresh = self.get_clock().now().nanoseconds - stamp_ns <= CMD_STALE_NS
-            if fresh and offset_deg is not None:
-                # ESP32 wire contract (mph / compass deg). No Pi-side gating: the ESP32
-                # validates target_speed and rejects out-of-range frames itself.
-                target_speed = speed_mps / MPH_TO_MPS
-                target_heading = wrap_0_360(math.degrees(heading_rad) + offset_deg)
-                parts.append(
-                    '"target_speed":%.2f,"target_heading":%.1f' % (target_speed, target_heading)
-                )
-            elif fresh:
-                # No offset, no command: a guessed heading offset would steer a real car wrong.
+        # Staleness is silence (NOT a zero command) — that is what trips the ESP32 failsafe.
+        if self.get_clock().now().nanoseconds - latched["stamp_ns"] > CMD_STALE_NS:
+            return
+
+        if latched["shape"] == DriveCommand.DIRECT:
+            # Raw-actuator frame: throttle/steering pass through [-1, 1], pan in degrees. No heading
+            # offset is needed (frame-relative), so DIRECT sends immediately, unlike SETPOINT.
+            frame = '{"throttle":%.3f,"steering":%.3f,"target_pan":%.1f}\n' % (
+                latched["throttle"], latched["steering"], latched["pan_deg"])
+        else:
+            # Setpoint frame needs the device/odom heading offset; a guessed heading would steer a
+            # real car wrong, so hold TX until the offset is known.
+            if offset_deg is None:
                 self.get_logger().warn(
                     "No heading offset yet (need paired odom + device yaw); not sending.",
                     throttle_duration_sec=2.0,
                 )
-
-        if not parts:
-            return  # nothing to send this tick
-
-        frame = "{" + ",".join(parts) + "}\n"
+                return
+            # ESP32 wire contract (mph / compass deg); the ESP32 validates/clamps target_speed.
+            target_speed = latched["speed"] / MPH_TO_MPS
+            target_heading = wrap_0_360(math.degrees(latched["heading"]) + offset_deg)
+            frame = '{"target_speed":%.2f,"target_heading":%.1f}\n' % (target_speed, target_heading)
 
         with self._ser_lock:
             ser = self._ser

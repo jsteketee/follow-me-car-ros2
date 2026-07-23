@@ -13,12 +13,18 @@ body {
   display: flex; align-items: center; gap: 12px;
   padding: 7px 14px; background: #23272c; border-bottom: 1px solid #33383e;
 }
-.topbar .title { font-weight: 600; font-size: 15px; }
+.topbar .title { font-weight: 600; font-size: 17px; }
 
-/* connection status, pushed to the far right of the top bar */
+/* latency timer + connection status, pushed to the far right of the top bar */
+.status-group { margin-left: auto; display: flex; align-items: center; gap: 14px; }
 .conn {
-  margin-left: auto; display: flex; align-items: center; gap: 5px;
+  display: flex; align-items: center; gap: 5px;
   font-size: 13px; font-weight: 500; color: #9aa4ad;
+}
+/* latency: ms since the last frame; green to match the connected indicator */
+.latency {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 13px; font-weight: 500; color: #46c76a; font-variant-numeric: tabular-nums;
 }
 
 /* ---- view tabs (right of the title) ---- */
@@ -73,7 +79,7 @@ body {
 /* ---- overview (vehicle status) view ---- */
 .overview { height: 100%; overflow-y: auto; padding: 16px; }
 .ovsection {
-  font-size: 10px; color: #8a939b; text-transform: uppercase; letter-spacing: .04em;
+  font-size: 12px; font-weight: 600; color: #8a939b; text-transform: uppercase; letter-spacing: .05em;
   margin-bottom: 10px;
 }
 .ovempty { font-size: 13px; color: #8a939b; }
@@ -85,6 +91,29 @@ body {
 .hval { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .htile.dead .hval { color: #d24b3e; }
 .htile.stale .hval { color: #8a939b; }
+.htile.warn .hval { color: #e0a13a; }
+.htile.crit .hval { color: #d24b3e; }
+.healthcols { display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-start; }
+.healthcol { display: flex; flex-direction: column; gap: 6px; min-width: 150px; }
+.coltiles { display: flex; flex-direction: column; gap: 8px; }
+
+/* test tab: direct-control + actuator-pwm cards */
+.testview { display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; align-items: flex-start; height: 100%; overflow-y: auto; }
+.card { background: #202429; border: 1px solid #2c3137; border-radius: 8px; padding: 16px; min-width: 300px; }
+.cardtitle { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: #8a939b; margin-bottom: 14px; }
+.shaperow { display: flex; gap: 8px; margin-bottom: 14px; }
+.shapebtn { flex: 1; padding: 8px 10px; background: #262b31; border: 1px solid #3a4048; border-radius: 6px; color: #c8ced4; font-size: 13px; cursor: pointer; }
+.shapebtn:hover { border-color: #4a5560; }
+.shapebtn.active { border-color: #4a90d9; color: #cfe4ff; }
+.cardnote { font-size: 12px; color: #e0a13a; margin-bottom: 12px; }
+.sliderrow { margin-bottom: 14px; }
+.sliderrow.locked { opacity: .5; }
+.sliderhead { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+.slabel { font-size: 13px; color: #c8ced4; }
+.sval { font-size: 13px; color: #4a90d9; font-variant-numeric: tabular-nums; }
+.sliderrow input[type=range] { width: 100%; display: block; }
+.sliderrow.locked input[type=range] { cursor: not-allowed; }
+.pwmgrid { display: flex; gap: 10px; flex-wrap: wrap; }
 
 /* ---- /rosout overlay (WARN+ log lines over the canvas, newest at the bottom) ---- */
 .rosout-overlay {
@@ -92,6 +121,11 @@ body {
   overflow: hidden; pointer-events: none;
   display: flex; flex-direction: column; justify-content: flex-end; gap: 2px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.5;
+}
+/* scrollable log history: newest (first child) pinned to the bottom, scroll up for older */
+.rosout-lines {
+  display: flex; flex-direction: column-reverse; gap: 2px;
+  min-height: 0; overflow-y: auto; pointer-events: auto; align-items: flex-start;
 }
 .rosout-line {
   background: rgba(26, 29, 33, .82); padding: 1px 6px; border-radius: 3px;

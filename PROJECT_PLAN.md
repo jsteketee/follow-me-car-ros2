@@ -50,10 +50,12 @@ latched `cmd_drive` is older than 500 ms.
 position (centering mid-turn on a comms blip would plow the car straight). STOPPED latches both
 axes neutral until a human re-arms.
 
-**Control modes** (reported in telemetry `mode`; the dashboard `/mode` endpoint is the sole
-authority — serial frames never change the mode): `SETPOINT` (setpoint frames → onboard PIDs; the
-boot default), `DIRECT` (raw-actuator frames, PIDs bypassed), `STOPPED` (kill switch, latches).
-Distinct from the Pi-side `nav_mode`, which selects the active Pi controller.
+**Control modes** (ESP32-internal, reported in telemetry `mode`; **never set by an outside actor** —
+the ESP32 infers the mode from command-frame shape, or drops into STOPPED on its own): `SETPOINT`
+(setpoint frames → onboard PIDs; the boot default), `DIRECT` (raw-actuator frames, PIDs bypassed;
+inferred from frame shape), `STOPPED` (onboard anomaly-detection failsafe, latches). The Pi neither
+sends a mode nor needs to trigger STOPPED. Distinct from the Pi-side `nav_mode`, which selects the
+active Pi controller.
 
 **Reboot recovery:** a backward jump in the ESP32 `ts` marks a reboot. The bridge logs it as an
 ERROR, halts TX until a fresh command (no auto-resume into a stale setpoint), and stitches the
@@ -266,7 +268,7 @@ ros2 run follow_me_nodes serial_bridge
 | `/actuator/status` | `follow_me_interfaces/ActuatorStatus` | live actuator outputs (throttle/steering/pan) |
 | `/cmd_drive` | `follow_me_interfaces/DriveCommand` | controller/nav → bridge (later: hardware interface) |
 | `/nav_mode` | `follow_me_interfaces/NavMode` | mode_manager → all (latched/transient_local): active Pi-side nav policy |
-| `/sensor_health` | `follow_me_interfaces/SensorHealth` | ESP32 → ROS2 (~1-2 Hz): per-sensor update rates from `{"type":"health"}` frames |
+| `/sensor_health` | `follow_me_interfaces/SensorHealth` | ESP32 → ROS2 (~1-2 Hz): per-sensor update rates from `{"type":"health"}` frames, plus link-health/throughput stats (telem rate, seq gaps, TX drops, inter-frame jitter) |
 
 Field-level schema for the ESP32-sourced topics — units, types, sentinels, wire conversions —
 is in **`interface.md`** (the SOT); this table is a topic directory, not the field spec.
@@ -277,10 +279,11 @@ is in **`interface.md`** (the SOT); this table is a topic directory, not the fie
 | `/set_nav_mode` | `follow_me_interfaces/SetNavMode` | request a nav_mode switch; mode_manager gates entry (unknown mode / car conditions) and answers accepted + reason. Callable from the web dashboard via foxglove_bridge. |
 
 **nav_mode vs command_mode (2026-07-20).** Two independent mode axes: `command_mode` is the
-**ESP32's** command interface (`SETPOINT`/`DIRECT`/`STOPPED`, dashboard-authoritative,
-reported in telemetry) and stays in SETPOINT for normal operation. `nav_mode` is the
+**ESP32's** command interface (`SETPOINT`/`DIRECT`/`STOPPED`, ESP32-owned — inferred from
+command-frame shape or set by the onboard anomaly-detection failsafe, never by the Pi; reported
+in telemetry, read-only) and stays in SETPOINT for normal operation. `nav_mode` is the
 **Pi-side** navigation policy (`follow`, `stopped`, future `waypoint`, …), owned by
-`mode_manager`, boots to `follow`. Controller nodes subscribe and act only when the mode
+`mode_manager`, boots to `stopped` (car idle until a human selects a driving mode). Controller nodes subscribe and act only when the mode
 they implement (their `active_mode` param) is active — multiple follow policies become
 sibling nodes with different `active_mode` values. On losing the mode, a controller sends
 one zero-speed command then goes cmd-silent (bridge 500 ms staleness gate + ESP32 300 ms

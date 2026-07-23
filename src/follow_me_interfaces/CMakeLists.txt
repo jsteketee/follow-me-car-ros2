@@ -14,6 +14,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/CommandStatus.msg"
   "msg/DriveCommand.msg"
   "msg/NavMode.msg"
+  "msg/PiHealth.msg"
   "msg/SensorHealth.msg"
   "msg/TagEstimate.msg"
   "msg/UwbRaw.msg"

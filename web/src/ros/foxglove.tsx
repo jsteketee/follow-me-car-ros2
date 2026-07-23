@@ -1,7 +1,7 @@
 // Foxglove ws-protocol connection to foxglove_bridge: one WebSocket, topic subscribe with
 // on-the-fly CDR decode (schema parsed from the channel advert), and ROS service calls
 // (CDR-encoded from the service advert's schema). Exposes subscribe + callService hooks.
-import { createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState, MutableRefObject, ReactNode } from "react";
 import { FoxgloveClient } from "@foxglove/ws-protocol";
 import { parse as parseRos2 } from "@foxglove/rosmsg";
 import { MessageReader, MessageWriter } from "@foxglove/rosmsg2-serialization";
@@ -10,6 +10,8 @@ export type ConnStatus = "connecting" | "connected" | "disconnected";
 type MsgCb = (msg: any) => void;
 type Unsub = () => void;
 type CallService = (name: string, request: any) => Promise<any>;
+type Publish = (topic: string, schemaName: string, schema: string, message: any) => boolean;
+type AdChannel = { id: number; writer: MessageWriter };
 type PendingCall = {
   svc: any;
   resolve: (v: any) => void;
@@ -27,6 +29,8 @@ const SUBPROTOCOLS = ["foxglove.sdk.v1", FoxgloveClient.SUPPORTED_SUBPROTOCOL];
 const SubscribeCtx = createContext<(topic: string, cb: MsgCb) => Unsub>(() => () => {});
 const StatusCtx = createContext<ConnStatus>("disconnected");
 const CallServiceCtx = createContext<CallService>(() => Promise.reject(new Error("no bridge")));
+const PublishCtx = createContext<Publish>(() => false);
+const LastFrameCtx = createContext<MutableRefObject<number>>({ current: 0 });
 
 // Resolve the bridge WebSocket URL: ?bridge= query, then VITE_BRIDGE_URL, else this host:8765.
 export function bridgeUrl(): string {
@@ -41,6 +45,9 @@ export function bridgeUrl(): string {
 export function FoxgloveProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<ConnStatus>("connecting");
 
+  // performance.now() of the most recent inbound message (any topic); 0 before the first frame.
+  const lastFrameRef = useRef<number>(0);
+
   // Caller subscriptions, kept across reconnects: topic -> set of callbacks.
   const subsRef = useRef<Map<string, Set<MsgCb>>>(new Map());
   // Per-connection bridge state, rebuilt on every (re)connect.
@@ -53,6 +60,8 @@ export function FoxgloveProvider({ children }: { children: ReactNode }) {
   const servicesByName = useRef<Map<string, any>>(new Map());
   const pendingCalls = useRef<Map<number, PendingCall>>(new Map());
   const nextCallId = useRef(1);
+  // Client-advertised topics for publishing: topic -> { channelId, CDR writer }. Rebuilt on reconnect.
+  const advertisedByTopic = useRef<Map<string, AdChannel>>(new Map());
 
   // Subscribe to a topic on the wire once its channel is advertised (idempotent).
   const wireSubscribe = useCallback((topic: string) => {
@@ -88,6 +97,32 @@ export function FoxgloveProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  // Publish a ROS message to a topic, advertising the channel on first use (CDR from the given
+  // schema). Returns false if the bridge is down or encoding/advertising fails.
+  const publish = useCallback((topic: string, schemaName: string, schema: string, message: any): boolean => {
+    const client = clientRef.current;
+    if (!client) return false;
+    let ad = advertisedByTopic.current.get(topic);
+    if (!ad) {
+      try {
+        const writer = new MessageWriter(parseRos2(schema, { ros2: true }));
+        const id = client.advertise({ topic, encoding: "cdr", schemaName, schema, schemaEncoding: "ros2msg" });
+        ad = { id, writer };
+        advertisedByTopic.current.set(topic, ad);
+      } catch (e) {
+        console.warn(`advertise failed for ${topic}`, e);
+        return false;
+      }
+    }
+    try {
+      client.sendMessage(ad.id, ad.writer.writeMessage(message));
+      return true;
+    } catch (e) {
+      console.warn(`publish failed for ${topic}`, e);
+      return false;
+    }
+  }, []);
+
   // Stable public subscribe: register the callback, bind the wire subscription if possible.
   const subscribe = useCallback((topic: string, cb: MsgCb): Unsub => {
     let set = subsRef.current.get(topic);
@@ -121,6 +156,7 @@ export function FoxgloveProvider({ children }: { children: ReactNode }) {
         subIdToTopic.current.clear();
         activeSubByTopic.current.clear();
         servicesByName.current.clear();
+        advertisedByTopic.current.clear();
         for (const p of pendingCalls.current.values()) {
           clearTimeout(p.timer);
           p.reject(new Error("bridge disconnected"));
@@ -173,6 +209,7 @@ export function FoxgloveProvider({ children }: { children: ReactNode }) {
       });
 
       client.on("message", (ev: any) => {
+        lastFrameRef.current = performance.now();
         const topic = subIdToTopic.current.get(ev.subscriptionId);
         if (!topic) return;
         const ch = channelByTopic.current.get(topic);
@@ -195,9 +232,13 @@ export function FoxgloveProvider({ children }: { children: ReactNode }) {
 
   return (
     <StatusCtx.Provider value={status}>
-      <CallServiceCtx.Provider value={callService}>
-        <SubscribeCtx.Provider value={subscribe}>{children}</SubscribeCtx.Provider>
-      </CallServiceCtx.Provider>
+      <LastFrameCtx.Provider value={lastFrameRef}>
+        <CallServiceCtx.Provider value={callService}>
+          <PublishCtx.Provider value={publish}>
+            <SubscribeCtx.Provider value={subscribe}>{children}</SubscribeCtx.Provider>
+          </PublishCtx.Provider>
+        </CallServiceCtx.Provider>
+      </LastFrameCtx.Provider>
     </StatusCtx.Provider>
   );
 }
@@ -205,6 +246,11 @@ export function FoxgloveProvider({ children }: { children: ReactNode }) {
 // Call a ROS service through the bridge: useCallService()(name, request) -> Promise<response>.
 export function useCallService(): CallService {
   return useContext(CallServiceCtx);
+}
+
+// Publish a ROS message: usePublish()(topic, schemaName, schema, message) -> sent? boolean.
+export function usePublish(): Publish {
+  return useContext(PublishCtx);
 }
 
 // Subscribe to a ROS topic for the component's lifetime; the latest callback is always used.
@@ -218,4 +264,9 @@ export function useRosTopic(topic: string, cb: MsgCb) {
 // Current connection status for UI indicators.
 export function useConnStatus(): ConnStatus {
   return useContext(StatusCtx);
+}
+
+// Ref holding performance.now() of the last inbound frame (any topic); 0 before the first.
+export function useLastFrameRef(): MutableRefObject<number> {
+  return useContext(LastFrameCtx);
 }

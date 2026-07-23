@@ -14,8 +14,8 @@ from follow_me_interfaces.srv import SetNavMode
 TOPIC_NAV_MODE = "nav_mode"
 SRV_SET_NAV_MODE = "set_nav_mode"
 
-DEFAULT_INITIAL_MODE = "follow"           # the stack boots straight into follow
-DEFAULT_ALLOWED_MODES = ["follow", "stopped"]   # grows with new policies ("waypoint", ...)
+DEFAULT_INITIAL_MODE = "stopped"          # boot idle — the car stays put until a human selects a driving mode
+DEFAULT_ALLOWED_MODES = ["follow", "stopped", "test"]   # "test" = dashboard direct-control teleop (nav yields)
 
 # Latched: late joiners (controllers, dashboard) get the current mode on subscribe.
 # Subscribers must also request TRANSIENT_LOCAL durability or they miss the latch.

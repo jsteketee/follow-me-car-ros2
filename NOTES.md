@@ -23,7 +23,7 @@ A reactive follow-me controller (`nav_controller`) now closes the loop: fused ta
 the ±60° recovery behavior, then the `/follow_me` action and the `NavigateToPose` /
 waypoint action servers. See PROJECT_PLAN.md Phases 8-10.
 **nav_mode shipped 2026-07-20**: `mode_manager` owns the Pi-side navigation mode (latched
-`nav_mode` topic + gated `set_nav_mode` service; boots to `follow`), `nav_controller` gates
+`nav_mode` topic + gated `set_nav_mode` service; boots to `stopped`), `nav_controller` gates
 on it (`active_mode` param) and the `follow:=true` launch arg is gone — the stack always
 launches both nodes. `CommandStatus.mode` renamed `command_mode` (wire key unchanged).
 Dashboard: nav-mode buttons call the service; `/rosout` WARN+ overlay on the 2D panel;
@@ -35,12 +35,13 @@ section, which supersedes the draft on every point where they differed — `targ
 naming, throttle-only failsafe, REMOTE/DIRECT/STOPPED modes, echo-field set.)
 
 ### Next up (added 2026-07-22)
-- **Direct control from the dashboard**: get bench teleop working end-to-end through the
-  ESP32 `DIRECT` actuator mode (raw `{"throttle","steering","target_pan"}` frames). The
-  firmware side (DIRECT mode + validation + Remote/Direct/Stopped buttons) already exists
-  (2026-07-14); the dashboard direct-drive controls were flagged there as a follow-up, plus
-  whatever Pi-side command path is needed to carry DIRECT frames (bridge currently only
-  sends SETPOINT `cmd_drive`).
+- **Direct control from the dashboard**: bench teleop by sending raw-actuator
+  `{"throttle","steering","target_pan"}` frames — the ESP32 infers `DIRECT` from the frame
+  *shape*, not from any mode command. The explicit Remote/Direct/Stopped mode-switch pathway
+  was removed 2026-07-23 (mode is now ESP32-internal, never set by the Pi). Firmware-side
+  DIRECT handling + validation already exist (2026-07-14). Remaining: the Pi-side command
+  path to emit raw-actuator frames (bridge currently sends only SETPOINT `cmd_drive`) plus
+  the dashboard direct-drive sliders.
 - **Simple follow command mode**: a minimal "steer toward the tag" follow behavior, below
   the full Phase 8 latched-goal `nav_controller` — a small, easy-to-reason-about first cut.
 - **Home for diagnostic flags, readiness, and policy substate** (open design decision):
@@ -77,8 +78,21 @@ naming, throttle-only failsafe, REMOTE/DIRECT/STOPPED modes, echo-field set.)
   additive telemetry field `enc_fault` (now on WheelState) and asymmetric fails-high
   `speed` semantics — all folded into interface.md 2026-07-21.
   **(A) de-moding is still TODO**: remove ControlMode, act on the most recent valid
-  command frame by shape, telemetry `mode` becomes `acting_on`. Pi bridge still parses
-  the old `mode` key until (A) lands.
+  command frame by shape, telemetry `mode` becomes `acting_on`. The Pi bridge keeps parsing
+  the `mode` key as **read-only** telemetry (observe-only — the Pi never sets or toggles the
+  mode; decision 2026-07-23); the wire key just renames to `acting_on` once (A) lands.
+
+- **Anomaly-driven E-stop (firmware, shipped 2026-07-23)**: onboard anomaly detection is now
+  the *only* automatic route into `STOPPED` — the manual dashboard e-stop / explicit
+  mode-change pathway was removed 2026-07-23 (mode is inferred purely from command-frame
+  shape). Implemented in `safety.cpp` (`safety_update`, wired into main's loop): (1) mode
+  thrashing >5 switches/s → ESTOP; (2) gyro timed out >10s → reboot; (3) loop starvation
+  (lps<1000 AND max loop-gap>1s) sustained >10s → reboot. The module is armed by
+  `safety_init()`, called last in `setup()`, so nothing is evaluated until every other module
+  is up (replaces the earlier fixed-uptime settle). **Decided against** a persistent
+  (RTC/NVS) boot-loop guard 2026-07-23: a permanent fault (e.g. IMU unplugged) will reboot on
+  a ~20s cycle and that's accepted. Relates to (A) de-moding above — if `ControlMode` is
+  removed, ESTOP becomes a standalone latched-halt state rather than a mode.
 
 - **Split rpm.cpp into hall / encoder / speed-fusion modules (todo, deferred 2026-07-16)**:
   rpm.cpp mixes three concerns with separate state — hall driver (ISR, EMA, odometry,

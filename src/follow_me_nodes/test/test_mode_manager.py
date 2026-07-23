@@ -39,17 +39,17 @@ def call(node, mode):
     return node._on_set_nav_mode(SetNavMode.Request(mode=mode), SetNavMode.Response())
 
 
-def test_boots_into_follow(node):
-    """The manager applies the initial mode at construction (default "follow")."""
-    assert node._mode == "follow"
+def test_boots_into_stopped(node):
+    """The manager applies the initial mode at construction (default "stopped")."""
+    assert node._mode == "stopped"
 
 
 def test_accepts_allowed_mode_and_announces(node):
     """An allowed mode is accepted, applied, and published on nav_mode."""
-    resp = call(node, "stopped")
+    resp = call(node, "follow")
     assert resp.accepted is True
-    assert node._mode == "stopped"
-    assert [m.mode for m in node.pub.msgs] == ["stopped"]
+    assert node._mode == "follow"
+    assert [m.mode for m in node.pub.msgs] == ["follow"]
 
 
 def test_rejects_unknown_mode(node):
@@ -57,12 +57,12 @@ def test_rejects_unknown_mode(node):
     resp = call(node, "hyperdrive")
     assert resp.accepted is False
     assert "hyperdrive" in resp.message
-    assert node._mode == "follow"
+    assert node._mode == "stopped"
     assert node.pub.msgs == []
 
 
 def test_setting_current_mode_does_not_republish(node):
     """Re-requesting the active mode is accepted but not re-announced."""
-    resp = call(node, "follow")
+    resp = call(node, "stopped")
     assert resp.accepted is True
     assert node.pub.msgs == []

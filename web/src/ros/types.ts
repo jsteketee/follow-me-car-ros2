@@ -15,6 +15,20 @@ export type ActuatorStatus = {
   throttle: number;   // normalized drive effort [0,1]
   steering: number;   // normalized steering effort [-1,1]
   pan_angle: number;  // rad, live pan servo angle
+  esc_pwm: number;    // raw ESC pulse width (us, ~1500 = neutral)
+  steer_pwm: number;  // raw steering pulse width (us)
+  pan_pwm: number;    // raw pan pulse width (us)
+};
+
+// follow_me_interfaces/msg/DriveCommand — dashboard-published drive command (SETPOINT or DIRECT).
+export type DriveCommandMsg = {
+  header: { stamp: { sec: number; nanosec: number }; frame_id: string };
+  shape: number;     // 0 = SETPOINT, 1 = DIRECT
+  speed: number;     // m/s (SETPOINT)
+  heading: number;   // rad, odom frame (SETPOINT)
+  throttle: number;  // [-1, 1] (DIRECT)
+  steering: number;  // [-1, 1] (DIRECT)
+  pan_deg: number;   // deg [-90, 90] (DIRECT)
 };
 
 // follow_me_interfaces/msg/TagEstimate — fused (EKF) tag estimate with uncertainty.
@@ -55,6 +69,21 @@ export type SensorHealthMsg = {
   rates_hz: number[];       // Hz per sensor, index-matched; 0 = silent
   max_loop_us: number;      // worst control-loop gap since last frame (us); 0 = not reported
   telem_frames_1s: number;  // Pi-parsed telemetry frames in the last 1 s (received rate)
+  tx_drops: number;         // ESP telemetry frames dropped at TX (cumulative)
+  seq_gaps: number;         // missing telemetry sequence numbers (cumulative)
+  parse_fails: number;      // unparseable/dropped telemetry lines (cumulative)
+  max_inter_frame_gap_ms: number;  // worst gap between frames since last emit
+};
+
+// follow_me_interfaces/msg/PiHealth — Raspberry Pi host health (pi_health node, ~1 Hz).
+export type PiHealthMsg = {
+  load_1m: number;             // 1-minute load average
+  ncpu: number;                // core count (to interpret load)
+  cpu_percent: number;         // overall CPU utilization, 0-100
+  bridge_cpu_percent: number;  // serial_bridge process CPU; -1 = not found
+  mem_used_mb: number;
+  mem_total_mb: number;
+  temp_c: number;              // CPU temperature (C); NaN = unavailable
 };
 
 // rcl_interfaces/msg/Log — one /rosout record from any ROS2 node.

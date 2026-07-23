@@ -49,11 +49,13 @@ export function RosoutOverlay() {
     (l) => shown[severityOf(l.level)] && Date.now() - l.wall < MAX_AGE_S * 1000);
   return (
     <div className="rosout-overlay">
-      {lines.map((l) => (
-        <div key={l.key} className={`rosout-line ${severityOf(l.level) === "error" ? "err" : severityOf(l.level)}`}>
-          [{l.name}] {l.msg}{l.count > 1 ? ` (x${l.count})` : ""}
-        </div>
-      ))}
+      <div className="rosout-lines">
+        {[...lines].reverse().map((l) => (
+          <div key={l.key} className={`rosout-line ${severityOf(l.level) === "error" ? "err" : severityOf(l.level)}`}>
+            [{l.name}] {l.msg}{l.count > 1 ? ` (x${l.count})` : ""}
+          </div>
+        ))}
+      </div>
       <div className="rosout-levels">
         {SEVERITIES.map((sev) => (
           <button

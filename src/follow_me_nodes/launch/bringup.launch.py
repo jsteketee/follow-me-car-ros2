@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """bringup.launch.py — launch the full car stack (state publisher, serial bridge,
 estimators, mode_manager, nav_controller, optional foxglove). Boots into nav_mode
-"follow"; switch via the set_nav_mode service. Args: namespace, foxglove, serial_port."""
+"stopped"; switch to "follow" via the set_nav_mode service. Args: namespace, foxglove, serial_port."""
 
 import os
 
@@ -87,7 +87,7 @@ def generate_launch_description():
             output="screen",
         ),
 
-        # Owns nav_mode (boots latched into "follow") and hosts set_nav_mode.
+        # Owns nav_mode (boots latched into "stopped") and hosts set_nav_mode.
         Node(
             package="follow_me_nodes",
             executable="mode_manager",
@@ -101,6 +101,15 @@ def generate_launch_description():
             package="follow_me_nodes",
             executable="nav_controller",
             name="nav_controller",
+            namespace=namespace,
+            output="screen",
+        ),
+
+        # Pi host health (CPU / mem / temp) at ~1 Hz — the "is the Pi the bottleneck?" monitor.
+        Node(
+            package="follow_me_nodes",
+            executable="pi_health",
+            name="pi_health",
             namespace=namespace,
             output="screen",
         ),

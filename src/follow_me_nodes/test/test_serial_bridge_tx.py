@@ -20,17 +20,32 @@ class FakeSerial:
 
     def __init__(self):
         self.writes = []                # list[bytes] — every write() payload, in order
-        self._lines = queue.Queue()     # telemetry lines to hand back from readline()
+        self._lines = queue.Queue()     # fed telemetry lines, drained into _buf by the reader
+        self._buf = bytearray()         # bytes pulled from _lines, served by read()
         self.closed = False
         self.write_timeout = 0.1
         self.timeout = 1.0
 
-    def readline(self):
-        """Return a fed line if one is queued, else b"" after a short wait (no busy-spin)."""
-        try:
-            return self._lines.get(timeout=0.02)
-        except queue.Empty:
-            return b""
+    @property
+    def in_waiting(self):
+        """Bytes ready to read: drain any queued lines into the buffer, report its length."""
+        while True:
+            try:
+                self._buf.extend(self._lines.get_nowait())
+            except queue.Empty:
+                break
+        return len(self._buf)
+
+    def read(self, n):
+        """Return up to n buffered bytes, else b"" after a short wait (no busy-spin)."""
+        if not self._buf:
+            try:
+                self._buf.extend(self._lines.get(timeout=0.02))
+            except queue.Empty:
+                return b""
+        take = bytes(self._buf[:n])
+        del self._buf[:n]
+        return take
 
     def write(self, data):
         """Record one TX payload."""

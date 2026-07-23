@@ -8,7 +8,7 @@ import { ns } from "../ros/topics";
 import { SetNavModeResponse } from "../ros/types";
 import { resolve } from "../ros/tf2d";
 
-const NAV_MODES = ["follow", "stopped"];  // extend as new policies land
+const NAV_MODES = ["follow", "stopped", "test"];  // extend as new policies land
 const DEG = 180 / Math.PI;
 const RANGE_SIGMA_MAX = 0.5;       // m — full bar (reasonable default)
 const BEARING_SIGMA_MAX_DEG = 20;  // deg — full bar

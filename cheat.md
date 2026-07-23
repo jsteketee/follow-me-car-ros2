@@ -4,6 +4,21 @@
 
 Commands for building, running, and inspecting the stack. Add to this as you go.
 
+## Dev environment (tmux)
+
+One command brings up a 4-quadrant tmux session on the Mac: ROS2 build+bringup
+(top-left), web build+serve on the Pi (top-right), Pi monitor (bottom-left), and a
+general-purpose Pi explorer shell (bottom-right). All four auto-run on startup. It
+first ensures the mutagen sync is up (`mutagen project start` if not already running,
+see [Dev sync](#dev-sync-mutagen)) so build-launch's flush has a session to flush.
+```bash
+dev-tmux                               # full clean ROS2 build + bringup
+dev-tmux -q                            # quick/incremental ROS2 build (no .msg rebuild)
+```
+
+> Re-running while the session is live just **attaches** (won't clobber a running
+> build/launch). To rebuild fresh: `tmux kill-session -t followme` first.
+
 ## Build
 
 ### Mac sync, build, source, launch
@@ -32,8 +47,9 @@ ros2 launch follow_me_nodes bringup.launch.py foxglove:=false     # bridge alrea
 ```
 
 > nav_controller + mode_manager always launch now (`follow:=true` is gone). The stack
-> boots into nav_mode "follow" — nav_controller DRIVES THE CAR once it has a trusted tag
-> fix. Park it with the dashboard's nav-mode buttons or:
+> boots into nav_mode "stopped" — the car stays idle until you switch to "follow", at which
+> point nav_controller DRIVES THE CAR once it has a trusted tag fix. Switch modes with the
+> dashboard's nav-mode buttons or:
 ```bash
 ros2 service call /fmbot/set_nav_mode follow_me_interfaces/srv/SetNavMode "{mode: stopped}"
 ros2 service call /fmbot/set_nav_mode follow_me_interfaces/srv/SetNavMode "{mode: follow}"
@@ -54,9 +70,9 @@ ros2 run follow_me_nodes serial_bridge --ros-args -r __ns:=/fmbot      # -> /fmb
 ros2 run follow_me_nodes nav_controller --ros-args -r __ns:=/fmbot
 ros2 run follow_me_nodes nav_controller --ros-args -r __ns:=/fmbot -p cruise_speed_mps:=1.34
 
-# Nav-mode owner (latched nav_mode topic + set_nav_mode service; boots to "follow").
+# Nav-mode owner (latched nav_mode topic + set_nav_mode service; boots to "stopped").
 ros2 run follow_me_nodes mode_manager --ros-args -r __ns:=/fmbot
-ros2 run follow_me_nodes mode_manager --ros-args -r __ns:=/fmbot -p initial_mode:=stopped
+ros2 run follow_me_nodes mode_manager --ros-args -r __ns:=/fmbot -p initial_mode:=follow
 ```
 
 ### Test
@@ -172,7 +188,7 @@ src/follow_me_nodes/follow_me_nodes/mode_manager.py     # owns nav_mode: latched
 ### Description / launch
 ```
 src/follow_me_nodes/urdf/follow_me_car.urdf     # Traxxas 1/16 E-Revo, box+cylinder primitives
-src/follow_me_nodes/launch/bringup.launch.py    # RSP + serial_bridge + pose_estimator + tag_broadcaster + tag_estimator + mode_manager + nav_controller + foxglove (boots into nav_mode "follow")
+src/follow_me_nodes/launch/bringup.launch.py    # RSP + serial_bridge + pose_estimator + tag_broadcaster + tag_estimator + mode_manager + nav_controller + foxglove (boots into nav_mode "stopped")
 ```
 
 ### TF tree
