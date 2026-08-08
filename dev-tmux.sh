@@ -3,8 +3,9 @@
 # on the Mac: ROS2 build+bringup, web build+serve, Pi monitor, local terminal.
 # Idempotent: re-running attaches to the existing session instead of rebuilding.
 #
-# Usage:  dev-tmux [-q|--quick]
-#   -q, --quick   incremental ROS2 build (skip the clean wipe); default is a full clean build.
+# Usage:  dev-tmux [-q|--quick | -l|--launch-only]
+#   -q, --quick        incremental ROS2 build (skip the clean wipe); default is a full clean build.
+#   -l, --launch-only  launch only — skip the ROS2 build and the web build, just serve/launch.
 
 set -euo pipefail
 
@@ -15,16 +16,20 @@ REPO_DIR="${REPO_DIR:-$HOME/repositories/follow-me-car-ros2}"    # Mac repo root
 BUILD_LAUNCH="${BUILD_LAUNCH:-$REPO_DIR/build-launch.sh}"
 BUILD_LAUNCH_ARGS="${BUILD_LAUNCH_ARGS:-}"                       # forwarded to build-launch.sh
 PIMON="${PIMON:-$HOME/repositories/pi-monitor/pimon.sh}"         # Mac-side Pi health monitor
+# /rosout one-line formatter; resolved against $REPO_DIR on the Mac and ~/$PI_DIR on the Pi.
+ROSOUT_FMT="${ROSOUT_FMT:-rosout-format.py}"
 SYNC_SESSION="${SYNC_SESSION:-fmcar}"                            # mutagen source session name
-WEB_URL="${WEB_URL:-http://10.0.0.25:8080/}"                     # dashboard URL (Pi LAN IP + serve port)
+WEB_URL="${WEB_URL:-http://followme-pi.local:8080/}"             # dashboard URL (Pi mDNS + serve port)
 OPEN_BROWSER="${OPEN_BROWSER:-1}"                                # 0 to skip auto-opening the dashboard
 PI_WAIT="${PI_WAIT:-1}"                                          # 0 to skip the Pi connectivity gate
 PI_WAIT_TIMEOUT="${PI_WAIT_TIMEOUT:-0}"                          # seconds to keep trying (0 = wait forever)
 
-# A leading -q/--quick means an incremental ROS2 build; anything else is a full clean build.
-if [ "${1:-}" = "-q" ] || [ "${1:-}" = "--quick" ]; then
-  BUILD_LAUNCH_ARGS="-q $BUILD_LAUNCH_ARGS"
-fi
+# A leading -q means an incremental ROS2 build; -l skips the ROS2+web builds and just launches.
+WEB_BUILD=1                                                      # 0 to skip `npm run build` (launch-only)
+case "${1:-}" in
+  -q|--quick)       BUILD_LAUNCH_ARGS="-q $BUILD_LAUNCH_ARGS" ;;
+  -l|--launch-only) BUILD_LAUNCH_ARGS="-l $BUILD_LAUNCH_ARGS"; WEB_BUILD=0 ;;
+esac
 
 # start_sync — ensure the mutagen sessions are up (build-launch only flushes an existing one).
 start_sync() {
@@ -109,13 +114,29 @@ tmux select-layout -t "$SESSION:main" tiled
 # Label the quadrants along the pane borders.
 tmux set-option -t "$SESSION" pane-border-status top
 tmux set-option -t "$SESSION" pane-border-format ' #{pane_title} '
-tmux select-pane -t "$tl" -T "terminal"
+tmux select-pane -t "$tl" -T "rosout"
 tmux select-pane -t "$tr" -T "web build+serve"
 tmux select-pane -t "$bl" -T "pi monitor"
 tmux select-pane -t "$br" -T "ros2 build+bringup"
 
-# Fire each quadrant's command. Top-left is left as a plain local shell for ad-hoc use.
-tmux send-keys -t "$tr" "mutagen sync flush $SYNC_SESSION && ssh -t $HOST 'cd ~/$PI_DIR/web && npm run build && npm run serve'" C-m
+# Fire each quadrant's command. Top-left tails the unified ROS log stream (/rosout) on the Pi.
+web_run="npm run serve"
+[ "$WEB_BUILD" = "1" ] && web_run="npm run build && $web_run"
+
+# rosout-format.py collapses each 8-line YAML block from `topic echo` into one timestamped,
+# severity-colored line. It runs Pi-side (keeps the pane a plain ssh -t, so Ctrl-C still kills
+# the remote echo), which means mutagen has to have pushed it; if the Mac copy is missing the
+# Pi's will be too, so fall back to the raw echo rather than leaving the quadrant dead.
+# PYTHONUNBUFFERED stops `topic echo` block-buffering now that its stdout is a pipe.
+rosout_run="source /opt/ros/jazzy/setup.bash && PYTHONUNBUFFERED=1 ros2 topic echo /rosout"
+if [ -r "$REPO_DIR/$ROSOUT_FMT" ]; then
+  rosout_run="$rosout_run | python3 -u ~/$PI_DIR/$ROSOUT_FMT"
+else
+  echo "==> $ROSOUT_FMT not found in $REPO_DIR — rosout quadrant will show raw YAML" >&2
+fi
+
+tmux send-keys -t "$tl" "ssh -t $HOST '$rosout_run'" C-m
+tmux send-keys -t "$tr" "mutagen sync flush $SYNC_SESSION && ssh -t $HOST 'cd ~/$PI_DIR/web && $web_run'" C-m
 tmux send-keys -t "$bl" "$PIMON" C-m
 tmux send-keys -t "$br" "$BUILD_LAUNCH $BUILD_LAUNCH_ARGS" C-m
 

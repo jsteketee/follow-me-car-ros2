@@ -54,7 +54,6 @@ export function OverviewPanel() {
   const sensors = s.health.filter((h) => h.name !== "loop");
   const loopHz = s.health.find((h) => h.name === "loop")?.hz ?? 0;
   const warn = (b: boolean) => (b ? "warn" : "");
-  const ncpu = s.piNcpu || 1;
   const memFrac = s.piMemTotalMb ? s.piMemUsedMb / s.piMemTotalMb : 0;
 
   return (
@@ -92,8 +91,8 @@ export function OverviewPanel() {
         <Col title="pi">
           <Tile label="cpu" value={pStale ? "—" : `${s.piCpu.toFixed(0)}%`}
                 cls={pStale ? "stale" : s.piCpu > 90 ? "crit" : warn(s.piCpu > 75)} />
-          <Tile label="load" value={pStale ? "—" : s.piLoad1m.toFixed(2)}
-                cls={pStale ? "stale" : s.piLoad1m >= ncpu * 1.5 ? "crit" : warn(s.piLoad1m >= ncpu * 0.9)} />
+          <Tile label="load" value={pStale ? "—" : `${s.piLoadPercent.toFixed(0)}%`}
+                cls={pStale ? "stale" : s.piLoadPercent >= 150 ? "crit" : warn(s.piLoadPercent >= 90)} />
           <Tile label="bridge cpu" value={pStale || s.piBridgeCpu < 0 ? "—" : `${s.piBridgeCpu.toFixed(0)}%`}
                 cls={pStale ? "stale" : warn(s.piBridgeCpu > 90)} />
           <Tile label="mem" value={pStale || !s.piMemTotalMb ? "—" : `${(memFrac * 100).toFixed(0)}%`}

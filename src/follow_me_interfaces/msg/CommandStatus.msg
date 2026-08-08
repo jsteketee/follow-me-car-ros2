@@ -1,16 +1,17 @@
 # Echo of the last command the ESP32 ACCEPTED — the feedback half of the cmd_drive
 # channel (cf. DriveCommand, the setpoint sent TO the car). Used to verify the TX path:
 # cmd_age_ms resetting means frames are landing; cmd_rejects ticking means they're
-# arriving but failing validation. Also carries the ESP32's live control mode, since the
-# mode decides which command shape is acted on. Values are the ESP32's accepted setpoints
-# converted to SI / REP-103 at the bridge. See interface.md.
+# arriving but failing validation. Carries both command shapes' echoes: speed/heading
+# (SETPOINT) and throttle/steering (DIRECT); the Pi reads the pair matching the shape it
+# sent. Values are the ESP32's accepted command converted to SI / REP-103 at the bridge.
+# See interface.md.
 std_msgs/Header header
-string  command_mode  # ESP32 control mode this frame: "SETPOINT", "DIRECT", or "STOPPED"
-                      #   (wire key stays "mode"; distinct from the Pi-side NavMode)
-float32 cmd_speed     # m/s, last accepted forward setpoint
+float32 cmd_speed     # m/s, last accepted forward setpoint (SETPOINT)
 float32 cmd_heading   # rad, last accepted absolute heading, odom frame (REP-103, CCW +);
                       #   the bridge converts device compass deg -> odom rad via the same
                       #   heading offset the TX path establishes (see T2b)
-float32 cmd_pan       # rad, last accepted pan setpoint
-int32   cmd_age_ms    # ms since the last accepted setpoint frame; -1 = none since boot
+float32 cmd_pan       # rad, last accepted pan setpoint (honored in any shape)
+float32 cmd_throttle  # normalized [-1, 1], last accepted DIRECT throttle echo (PIDs bypassed)
+float32 cmd_steering  # normalized [-1, 1], last accepted DIRECT steering echo
+int32   cmd_age_ms    # ms since the last accepted command; -1 = none since boot
 uint32  cmd_rejects   # commands rejected by ESP32 validation since boot (monotonic)

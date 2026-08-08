@@ -10,18 +10,20 @@ interface is specified in **`interface.md`** (the SOT); notes here don't re-spec
 ## To Do
 
 ### Current focus
-Data path up is working (Phases 3, 4 core, and 6 ✅). The Phase 5 Pi fusion node is NOT
-built — and as of 2026-07-16 the ESP32's tag Kalman is deleted too, so the wire carries
-raw `uwb_*` only: raw fixes drive `tag_link` directly until Phase 5 provides filtering.
+Data path up is working (Phases 3, 4 core, 6 ✅). **Phase 5 core is built (2026-07-24):**
+`tag_estimator` (EKF: `uwb/raw` + pan + odom → `fused/tag_pose` / `TagEstimate`) supersedes the
+deleted ESP32 tag Kalman. Refinements still open (distance dead-reckoning, erratic detector,
+anchor-lag comp — see "Pi reimplementation checklist").
 **Command path down ✅ 2026-07-13**: ESP32 accepts `target_speed` + `target_heading`
 frames with validation, `SETPOINT` mode (the boot default, holding boot heading; named
 `REMOTE` until 2026-07-16), and the cmd-timeout failsafe (revised: throttle-only;
 steering holds last heading) — bench-validated on the stand. Bridge updated 2026-07-16
 to the slimmed telemetry frame (full schema in interface.md).
 A reactive follow-me controller (`nav_controller`) now closes the loop: fused tag ->
-`cmd_drive` -> car (first cut of Phase 8, 2026-07-17). Next layers: confidence gating +
-the ±60° recovery behavior, then the `/follow_me` action and the `NavigateToPose` /
-waypoint action servers. See PROJECT_PLAN.md Phases 8-10.
+`cmd_drive` -> car (Phase 8 core, 2026-07-17). Next layers: split into simple + complex follow
+policies, confidence gating + the ±60° recovery behavior. **Action servers + Nav2 dropped
+2026-07-24** — nav is mode-based (a controller per `nav_mode`), and waypoint missions are a custom
+dead-reckoning controller, not `FollowWaypoints`. See PROJECT_PLAN.md Goals + Phases.
 **nav_mode shipped 2026-07-20**: `mode_manager` owns the Pi-side navigation mode (latched
 `nav_mode` topic + gated `set_nav_mode` service; boots to `stopped`), `nav_controller` gates
 on it (`active_mode` param) and the `follow:=true` launch arg is gone — the stack always
@@ -33,6 +35,50 @@ ESP32 `{"type":"log",...}` event frames re-log to `/rosout` (firmware emit side 
 is implemented and its settled decisions were folded into interface.md
 section, which supersedes the draft on every point where they differed — `target_heading`
 naming, throttle-only failsafe, REMOTE/DIRECT/STOPPED modes, echo-field set.)
+
+### Plan reshape (2026-07-24)
+Scope decisions folded into PROJECT_PLAN (Goals + Phases 7–12):
+- **Dropped ros2_control (Phase 7)** — payoff needs the control loop on the Pi, but the PIDs are on
+  the ESP32; also doesn't fit one-serial-bus rich telemetry. Python `serial_bridge` is the permanent
+  HAL boundary. micro-ROS parked as the only "standard" that actually fits the wire.
+- **Dropped Nav2 + all action servers** — Ackermann + heading-setpoint command surface doesn't fit
+  Nav2's costmap/`cmd_vel` model. Nav is mode-based instead.
+- **New committed goals:** manual field teleop (dashboard joystick — control law in PROJECT_PLAN),
+  waypoint missions (custom dead-reckoning canvas; promotes the "phone waypoint UI" idea), UWB pan
+  tracking (Pi `pan_controller` → `target_pan`, always-on, dead-reckons aim through dropout),
+  laptop-free bringup (Pi self-starts the stack on boot).
+- **Follow-me → two policies:** simple "steer at the tag" cut + the complex confidence-gated /
+  recovery version (see "Follow-me as waypoint planning with recovery" below), as sibling
+  controllers with different `active_mode`.
+
+Open (need my input before building): the two joystick specifics flagged in PROJECT_PLAN (steering =
+integrating rate; gate relative to measured yaw); pan-setpoint transport (separate `/cmd_pan` topic
+vs. `DriveCommand` field); what exactly separates "simple" vs. "complex" follow.
+
+### Pi rebuild + field networking (2026-07-24, PARKED — rebuild when current work is done)
+Trigger: home WiFi SSID changed → Pi couldn't auto-join → unreachable (`followme-pi.local` won't
+resolve; SSH config is just `HostName followme-pi.local`, User ubuntu — no static IP, pure mDNS).
+While recovering, the **Pi's 8 GB microSD died** (confirmed dead 2026-07-24: reads `IOContent: None`
+/ no partition table across a known-good reader — it read a 256 GB card fine — and two different
+adapters). **No data loss** — the workspace is Mac source-of-truth via mutagen; only OS-level
+provisioning is gone, and that was never scripted. Skip data recovery (nothing unique on the card;
+check `bags/` is already synced to the Mac).
+
+Rebuild = the **field-ready milestone**, done as a reproducible provision (write `provision-pi.md`):
+- **Flash a 32 GB+ A2 / high-endurance card** (not the dead 8 GB — matches the specced Samsung
+  Endurance / SanDisk A2) with **Raspberry Pi Imager advanced preconfig**: hostname `followme-pi`,
+  SSH + Mac pubkey, new home WiFi. First boot is on the network + SSH-ready → kills the headless
+  bootstrap catch-22 that started this.
+- **Provision (SSH):** ROS2 Jazzy, `foxglove_bridge`, `psutil`/`pyserial`, serial access
+  (`dialout` group / udev for `/dev/ttyACM0`), mutagen agent.
+- **Bake field-ready:** netplan multi-network (home + **phone-hotspot fallback** — chosen over
+  Pi-as-AP: Pi stays a pure client, phone is also the dashboard device; `optional: true` so boot
+  doesn't hang on wifi) + **systemd autostart** of the stack (laptop-free bringup).
+- **Verify:** mutagen resync → `colcon build` → dashboard end-to-end.
+
+Field-networking caveat (banked): **mDNS `.local` over a phone hotspot is unreliable** — usually
+works on iOS, but some Android hotspots isolate clients / block Bonjour. Fallback = load the
+dashboard via the Pi's hotspot-assigned IP (iOS hands out `172.20.10.x`). Test before relying on it.
 
 ### Next up (added 2026-07-22)
 - **Direct control from the dashboard**: bench teleop by sending raw-actuator
@@ -230,9 +276,10 @@ PROJECT_PLAN does not yet capture explicitly — fold into Phases 5/8 when build
 ## Navigation Modes / Mission Profiles
 
 ### Mode 1 — Single car, dead reckoning + UWB follow-me (current plan)
-- Follow-me: UWB AoA bearing + distance, camera fusion, PID control
-- Commanded nav: waypoint missions using IMU yaw + RPM odometry
-- Nav2-compatible action interfaces
+- Follow-me: UWB AoA bearing + distance, EKF fusion, PID control (simple + complex policies)
+- Commanded nav: waypoint missions using IMU yaw + wheel odometry — custom dead-reckoning
+- Manual field teleop via the dashboard joystick
+- (Nav2-compatible action interfaces dropped 2026-07-24 — see To Do "Plan reshape")
 
 ### Mode 2 — Single car, camera-based person following
 - Primary sensor: camera with person detection algorithm (no wearable required)
@@ -269,9 +316,9 @@ PROJECT_PLAN does not yet capture explicitly — fold into Phases 5/8 when build
   convert confident tag fixes into waypoints in the `odom` frame and follow those. Anomalous
   UWB readings (angle clamped at ±90, bearing jump inconsistent with dead-reckoned motion,
   fusion uncertainty spike) then trigger a *recovery plan* rather than steering on a false
-  tag location. Fits naturally once `NavigateToPose` exists: follow-me becomes continuous
-  goal-updating on the same nav machinery as waypoint missions, unifying Mode 1 with the
-  commanded-nav system.
+  tag location. Fits naturally on the custom waypoint machinery (Phase 10): follow-me becomes
+  continuous goal-updating on the same dead-reckoning nav as waypoint missions, unifying Mode 1
+  with the commanded-nav system — no Nav2 needed (dropped 2026-07-24).
 
   Sketched recovery behavior:
   1. When bearing approaches/exits the reliable cone (|bearing| past ~60°), store the last
@@ -302,6 +349,13 @@ PROJECT_PLAN does not yet capture explicitly — fold into Phases 5/8 when build
 - Record and replay a driven path as a waypoint mission
 - Multi-tag support — follow one of several tagged people
 - Return-to-home behavior when tag is lost for too long
+- **Wire-protocol / transport** (parked 2026-07-24, from the bus-architecture discussion): the
+  single-serial-bus + control-on-MCU design is the mainstream high-level/low-level split, so no bus
+  change is warranted. If throughput/jitter needs more headroom, the congruent moves are a binary
+  frame format (replace text JSON — kills parse cost, ~5-10× denser) and non-blocking ESP32 TX, not
+  new hardware. micro-ROS is the only "standard" that actually fits MCU-over-serial (ESP32 becomes a
+  first-class ROS2 node over the same wire) — a real rewrite, kept as an option, ranked above
+  ros2_control. Relates to the Pi-drain throughput regression in To Do "Next up".
 
 ---
 
@@ -343,6 +397,21 @@ description-only. The code keeps one-line pointers back here.
   Inverting: `offset_deg = wrap_pm180(device_yaw_deg − degrees(odom_yaw))`, then
   `target_heading = wrap_0_360(degrees(cmd.heading) + offset_deg)` (PLUS sign). EMA runs on the
   WRAPPED delta so it survives the 0/360 seam.
+- Telemetry-silence watchdog: every other link counter (`seq_gaps`, `parse_fails`,
+  `telem_frames_1s`) is emitted from `_handle_health_frame` — i.e. only when an ESP32 frame
+  arrives — so a fully silent wire reports nothing at all. This timer runs on the Pi's own clock
+  and is the only detector that still fires once the link goes quiet.
+- `TELEM_WATCHDOG_PERIOD_S` stays well under `TELEM_SILENCE_LIMIT_NS`: the 1 Hz log throttle sets
+  the output rate, and a period at/near 1 s races the throttle window and loses every other
+  warning. Measured at 0.25 s: warnings 1.00 s then 1.25 s apart, never faster than 1/s.
+  Detection latency is one period.
+- `_telem_watchdog_tick` runs on the executor thread, so it still fires while the reader thread is
+  parked in `ser.read()`. It reads `_last_frame_ns` unlocked — a single attribute load is atomic
+  under the GIL, and locking a field the 50 Hz path writes would cost more than it buys.
+- The watchdog baselines on `_node_start_ns` until the first frame lands, so an ESP32 that never
+  streams is reported too, not just a link that goes quiet mid-run. `_last_frame_ns` advances only
+  on a fully published frame, so frames that arrive but fail every parse also read as silence —
+  hence "link silent or all frames dropping" in the message; `parse_fails` is what splits them.
 
 **pose_estimator.py**
 - Odometer is cached by the IMU callback; both come from the same serial frame, and the bridge

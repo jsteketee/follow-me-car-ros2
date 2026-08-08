@@ -6,8 +6,10 @@ design) lives in `PROJECT_PLAN.md` "Serial Link" — this doc is only the field 
 
 - **Transport:** USB-CDC, newline-delimited JSON, one object per line.
 - **Rates:** telemetry ESP32→Pi at 50 Hz; commands Pi→ESP32 at 20 Hz.
-- **Units:** the ESP32 speaks mph / cm / degrees; the bridge (`serial_bridge.py`) converts to
-  SI / REP-103 (m, m/s, rad, CCW-positive) once, so every downstream ROS2 topic is SI.
+- **Units:** SI on the wire (as of 2026-07-25). The ESP32 represents speed (m/s), distance (m),
+  and acceleration (m/s²) internally and on the wire; only **angles are degrees**
+  (yaw/heading/pan/bearing). The bridge (`serial_bridge.py`) converts just the angles to
+  REP-103 radians — speed/distance pass through unscaled.
 - **Idempotency (serial + telemetry requirement):** every telemetry frame is a complete,
   self-contained snapshot of current state — no deltas, no dependence on prior frames. Any
   single received frame fully reconstructs the receiver's view, so a dropped or torn frame
@@ -25,7 +27,7 @@ design) lives in `PROJECT_PLAN.md` "Serial Link" — this doc is only the field 
 3. **Stable JSON type per field** (int / float / string do not vary frame to frame).
 4. **Unknown telemetry keys are ignored;** unknown `"type"` event frames warn once and drop.
 
-**Conversion constants:** `MPH_TO_MPS = 0.44704`, `CM_TO_M = 0.01`, `DEG_TO_RAD = π/180`.
+**Conversion constants:** `DEG_TO_RAD = π/180` (angles only; speed/distance are SI on the wire).
 
 ---
 
@@ -41,7 +43,7 @@ loop-driven groups have no `t` and are stamped with the frame `ts`.
   "imu":   { "t": 148228, "yaw": 271.30, "yaw_rate": 1.85, "pitch": -1.20, "roll": 0.55, "lax": 0.142 },
   "uwb":   { "t": 148190, "dist": 212.4, "bearing": -3.75 },
   "cmd":   { "t": 148170, "speed": 2.00, "heading": 270.0, "pan": -5.0, "throttle": 0.00, "steering": 0.00, "rejects": 0 },
-  "wheel": { "speed": 1.983, "odo": 4521.6, "cogging": 0, "enc_fault": 0 },
+  "wheel": { "speed": 1.983, "speed_var": 0.0142, "odo": 4521.6, "cogging": 0, "enc_fault": 0 },
   "ctrl":  { "throttle": 0.318, "steering": -0.045, "esc_pwm": 1567, "steer_pwm": 1489, "pan_pwm": 1472, "pan_angle": -4.80 }
 }
 ```
@@ -66,17 +68,18 @@ fusion-input health signal.
 | `imu.yaw_rate` | float · deg/s | `imu/data` · angular_velocity.z | rad/s | ×`DEG_TO_RAD`, sign as `yaw` |
 | `imu.lax` | float · m/s² | `imu/data` · linear_acceleration.x | m/s² | passthrough; forward axis |
 | `uwb.t` | long · ms | *(stamps `uwb/raw`; → `age_ms`)* | ROS time / int32 | last accepted ranging frame; Pi sets `age_ms = ts − t`; **`-1` = none since boot** |
-| `uwb.dist` | float · cm | `uwb/raw` · distance | m | ×`CM_TO_M`; **`< 0` (wire `-1`) = no fix, not scaled** |
+| `uwb.dist` | float · m | `uwb/raw` · distance | m | passthrough; **`< 0` (wire `-1`) = no fix** |
 | `uwb.bearing` | float · deg (+ = right) | `uwb/raw` · bearing | rad (+ = left) | ×`DEG_TO_RAD` then **negated** (device +right → REP-103 +left) |
 | `cmd.t` | long · ms | *(stamps `command/status`; → `cmd_age_ms`)* | ROS time / int32 | last accepted command; Pi sets `cmd_age_ms = ts − t`; **`-1` = none since boot** |
-| `cmd.speed` | float · mph, ≥0 | `command/status` · cmd_speed | m/s | ×`MPH_TO_MPS`; never negative |
+| `cmd.speed` | float · m/s, ≥0 | `command/status` · cmd_speed | m/s | passthrough; never negative |
 | `cmd.heading` | float · deg (compass) | `command/status` · cmd_heading | rad (odom) | `radians(deg − heading_offset)`, normalized |
 | `cmd.pan` | float · deg | `command/status` · cmd_pan | rad | ×`DEG_TO_RAD` |
 | `cmd.throttle` | float · `[-1,1]` | `command/status` · cmd_throttle | dimensionless | accepted **DIRECT** throttle echo (PIDs bypassed), not the actuator output; the Pi reads it when it commanded DIRECT — it knows the shape it sent |
 | `cmd.steering` | float · `[-1,1]` | `command/status` · cmd_steering | dimensionless | accepted **DIRECT** steering echo |
 | `cmd.rejects` | ulong · count | `command/status` · cmd_rejects | uint32 | monotonic; ticks on a rejected command value |
-| `wheel.speed` | float · mph | `wheel/state` · speed | m/s | ×`MPH_TO_MPS`; **signed** (`< 0` = reverse/rollback) |
-| `wheel.odo` | float · cm | `wheel/state` · distance | m | ×`CM_TO_M`; **signed**; stitched continuous across reboots (does not reset) |
+| `wheel.speed` | float · m/s | `wheel/state` · speed | m/s | passthrough; **signed** (`< 0` = reverse/rollback) |
+| `wheel.speed_var` | float · (m/s)² | `wheel/state` · speed_variance | (m/s)² | passthrough; fused-speed estimate variance (KF `P[0][0]`); higher = less certain |
+| `wheel.odo` | float · m | `wheel/state` · distance | m | passthrough; **signed**; stitched continuous across reboots (does not reset) |
 | `wheel.cogging` | int · 0/1 | `wheel/state` · cogging | bool | |
 | `wheel.enc_fault` | int · 0/1 | `wheel/state` · enc_fault | bool | true → trust `distance` less |
 | `ctrl.throttle` | float · `[-1,1]` | `actuator/status` · throttle | dimensionless | control **output**, not command; `< 0` = braking. SETPOINT clamps to `[-0.25,1]` (PID brake floor); DIRECT passes the commanded effort through, so the full `[-1,1]` appears in DIRECT mode. |
@@ -98,7 +101,7 @@ fusion-input health signal.
 
 | Field | Wire (type·unit) | Source (SI) | Conversion / notes |
 |---|---|---|---|
-| `target_speed` | float · mph, ≥0 | `DriveCommand.speed` (m/s) | ÷`MPH_TO_MPS`; clamped ≥0 (no commanded reverse) |
+| `target_speed` | float · m/s, ≥0 | `DriveCommand.speed` (m/s) | passthrough; clamped ≥0 (no commanded reverse) |
 | `target_heading` | float · deg (compass) | `DriveCommand.heading` (rad, odom) | `degrees(rad) + heading_offset`, wrapped `[0,360)`. Offset = EMA of `device_yaw − odom_yaw`. |
 | `target_pan` | float · deg | pan policy (Pi) | optional; honored in any frame shape; 0 = nose, + = right |
 

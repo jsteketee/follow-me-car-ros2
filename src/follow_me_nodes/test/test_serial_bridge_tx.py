@@ -12,7 +12,7 @@ import rclpy
 
 from nav_msgs.msg import Odometry
 from follow_me_interfaces.msg import DriveCommand
-from follow_me_nodes.serial_bridge import SerialBridge, MPH_TO_MPS
+from follow_me_nodes.serial_bridge import SerialBridge
 
 
 class FakeSerial:
@@ -85,8 +85,8 @@ def make_odom(yaw_rad, stamp_ns):
 
 
 def make_telem(ts, yaw=0.0):
-    """Minimal telemetry dict for _publish (all other fields default via .get)."""
-    return {"ts": ts, "yaw": yaw}
+    """Minimal grouped telemetry dict for _publish (absent groups are skipped; see interface.md)."""
+    return {"ts": ts, "imu": {"t": ts - 2, "yaw": yaw}}
 
 
 def establish_offset(node, device_deg, odom_yaw_rad, t_ns=None):
@@ -142,7 +142,7 @@ def test_timer_period_and_stream(node):
 
 
 def test_unit_and_sign_roundtrip(node):
-    """(2) speed 1.0 m/s -> ~2.24 mph; heading == odom yaw of the pair -> device yaw back."""
+    """(2) speed passes through in m/s; heading == odom yaw of the pair -> device yaw back."""
     n, fake = node
     device_yaw, odom_yaw = 100.0, math.radians(30.0)
     establish_offset(n, device_yaw, odom_yaw)   # offset = wrap_pm180(100 - 30) = 70
@@ -151,7 +151,7 @@ def test_unit_and_sign_roundtrip(node):
     n._tx_tick()
 
     frame = last_frame(fake)
-    assert frame["target_speed"] == pytest.approx(1.0 / MPH_TO_MPS, abs=0.01)  # ~2.24
+    assert frame["target_speed"] == pytest.approx(1.0, abs=0.001)
     assert frame["target_heading"] == pytest.approx(device_yaw, abs=0.2)       # round-trip
 
 
@@ -219,13 +219,13 @@ def test_speed_passthrough_and_nan_reject(node):
     n, fake = node
     establish_offset(n, 0.0, 0.0)
 
-    n._on_cmd_drive(make_cmd(5.0, 0.0))    # 5 m/s -> ~11.18 mph, sent raw (no Pi cap)
+    n._on_cmd_drive(make_cmd(5.0, 0.0))
     n._tx_tick()
-    assert last_frame(fake)["target_speed"] == pytest.approx(5.0 / MPH_TO_MPS, abs=0.01)
+    assert last_frame(fake)["target_speed"] == pytest.approx(5.0, abs=0.001)
 
     n._on_cmd_drive(make_cmd(-1.0, 0.0))   # negative sent raw (ESP32 rejects it, not the Pi)
     n._tx_tick()
-    assert last_frame(fake)["target_speed"] == pytest.approx(-1.0 / MPH_TO_MPS, abs=0.01)
+    assert last_frame(fake)["target_speed"] == pytest.approx(-1.0, abs=0.001)
 
     n._on_cmd_drive(make_cmd(0.5, float("nan")))  # non-finite heading -> not latched (guard kept)
-    assert n._latched[0] == -1.0           # prior latch (speed -1.0) intact, NaN not stored
+    assert n._latched["speed"] == -1.0     # prior latch (speed -1.0) intact, NaN not stored

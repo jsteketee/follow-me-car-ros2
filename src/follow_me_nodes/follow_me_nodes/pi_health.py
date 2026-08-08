@@ -59,8 +59,7 @@ class PiHealthNode(Node):
         vm = psutil.virtual_memory()
         msg = PiHealth()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.load_1m = float(os.getloadavg()[0])
-        msg.ncpu = int(self.ncpu)
+        msg.load_percent = float(os.getloadavg()[0]) / self.ncpu * 100.0  # % of total CPU capacity
         msg.cpu_percent = float(psutil.cpu_percent(interval=None))  # % since the last tick (~1 s)
         msg.bridge_cpu_percent = self._bridge_cpu()
         msg.mem_used_mb = int((vm.total - vm.available) // (1024 * 1024))

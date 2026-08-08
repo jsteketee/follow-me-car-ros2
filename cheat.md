@@ -6,14 +6,26 @@ Commands for building, running, and inspecting the stack. Add to this as you go.
 
 ## Dev environment (tmux)
 
-One command brings up a 4-quadrant tmux session on the Mac: ROS2 build+bringup
-(top-left), web build+serve on the Pi (top-right), Pi monitor (bottom-left), and a
-general-purpose Pi explorer shell (bottom-right). All four auto-run on startup. It
-first ensures the mutagen sync is up (`mutagen project start` if not already running,
-see [Dev sync](#dev-sync-mutagen)) so build-launch's flush has a session to flush.
+One command brings up a 4-quadrant tmux session on the Mac: `/rosout` tail (top-left),
+web build+serve on the Pi (top-right), Pi monitor (bottom-left), and ROS2 build+bringup
+(bottom-right). All four auto-run on startup. It first ensures the mutagen sync is up
+(`mutagen project start` if not already running, see [Dev sync](#dev-sync-mutagen)) so
+build-launch's flush has a session to flush.
 ```bash
 dev-tmux                               # full clean ROS2 build + bringup
 dev-tmux -q                            # quick/incremental ROS2 build (no .msg rebuild)
+dev-tmux -l                            # launch only — skip the ROS2 and web builds
+```
+
+The rosout quadrant pipes `ros2 topic echo /rosout` through `rosout-format.py`, which
+collapses each 8-line YAML block into one severity-colored line:
+```
+12:34:56.789 WARN  [serial_bridge] frame dropped: bad checksum
+```
+It runs Pi-side, so mutagen must have pushed it; if the file is missing the quadrant falls
+back to raw YAML and dev-tmux says so on startup. Standalone use (any stream, any host):
+```bash
+PYTHONUNBUFFERED=1 ros2 topic echo /rosout | python3 -u rosout-format.py [--no-color]
 ```
 
 > Re-running while the session is live just **attaches** (won't clobber a running
@@ -139,7 +151,7 @@ Records a fixed window of the health topics (`pi_health` + `sensor_health`) into
 under `bags/performance-benchmark/`, then prints and saves each field's average + max over the
 run as `<bag-name>-report.csv` beside the bag. Run with the stack up so the topics are live.
 ```bash
-./performance-benchmark.sh                     # record 30 s, then report
+./performance-benchmark.sh                     # record 10 s, then report
 DURATION_S=60 ./performance-benchmark.sh       # override the window (seconds)
 ./performance-benchmark.sh bags/performance-benchmark/performance-benchmark_YYYYMMDD_HHMMSS
                                                # existing bag: skip recording, just (re)build its report

@@ -144,6 +144,7 @@ body {
   padding: 1px 8px; border-radius: 3px; border: 1px solid #363c44; cursor: pointer;
 }
 .rosout-level:hover { color: #e6e6e6; }
+.rosout-level.clear:hover { color: #d24b3e; border-color: #d24b3e; }
 .rosout-level.on.info { color: #5aa2e6; border-color: #5aa2e6; }
 .rosout-level.on.warn { color: #e0b13c; border-color: #e0b13c; }
 .rosout-level.on.error { color: #d24b3e; border-color: #d24b3e; }

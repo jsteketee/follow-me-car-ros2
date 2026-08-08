@@ -42,14 +42,15 @@ export type TagEstimate = {
   coasting: boolean;      // true = dead-reckoned, sigmas growing
 };
 
-// follow_me_interfaces/msg/CommandStatus — echo of the ESP32's accepted command + mode.
+// follow_me_interfaces/msg/CommandStatus — echo of the ESP32's accepted command (both shapes).
 export type CommandStatus = {
-  command_mode: string; // ESP32 control mode: "SETPOINT" | "DIRECT" | "STOPPED"
-  cmd_speed: number;    // m/s
-  cmd_heading: number;  // rad, odom frame
-  cmd_pan: number;      // rad
-  cmd_age_ms: number;   // ms since last accepted setpoint; -1 = none
-  cmd_rejects: number;  // monotonic reject counter
+  cmd_speed: number;     // m/s (SETPOINT)
+  cmd_heading: number;   // rad, odom frame (SETPOINT)
+  cmd_pan: number;       // rad
+  cmd_throttle: number;  // [-1, 1] (DIRECT)
+  cmd_steering: number;  // [-1, 1] (DIRECT)
+  cmd_age_ms: number;    // ms since last accepted command; -1 = none
+  cmd_rejects: number;   // monotonic reject counter
 };
 
 // follow_me_interfaces/msg/NavMode — the active Pi-side navigation policy (latched).
@@ -77,8 +78,7 @@ export type SensorHealthMsg = {
 
 // follow_me_interfaces/msg/PiHealth — Raspberry Pi host health (pi_health node, ~1 Hz).
 export type PiHealthMsg = {
-  load_1m: number;             // 1-minute load average
-  ncpu: number;                // core count (to interpret load)
+  load_percent: number;        // 1-min load average as % of total CPU capacity
   cpu_percent: number;         // overall CPU utilization, 0-100
   bridge_cpu_percent: number;  // serial_bridge process CPU; -1 = not found
   mem_used_mb: number;

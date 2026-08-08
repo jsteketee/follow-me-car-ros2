@@ -10,27 +10,38 @@ the SOT for the ESP32 ↔ Pi contract.
 
 ## Goals
 
-1. **Follow-me mode** — car autonomously follows the UWB tag, implemented as ROS2 nodes on the Pi.
-2. **Dead reckoning commanded nav** — send the car a heading + distance, or a sequence of waypoints; executed using IMU yaw + RPM odometry. No map or LIDAR required.
-3. **Nav2-compatible interfaces** — implement standard `nav2_msgs/NavigateToPose` and `nav2_msgs/FollowWaypoints` action servers. Compatible with Nav2 if a LIDAR/map is added later.
-4. **(Stretch) Web waypoint canvas** — custom browser UI (rosbridge + roslibjs) for dropping waypoints onto a map view. The same interaction exists in the standard stack first (RViz/Foxglove "Goal Pose" click → `NavigateToPose`), so this is later polish, not core.
+1. **Follow-me mode** — car autonomously follows the UWB tag, as ROS2 nodes on the Pi.
+   Delivered in two policies: a **simple** "steer at the tag" cut and a **complex**
+   confidence-gated / recovery-capable version (see NOTES.md).
+2. **Manual field teleop** — drive from the dashboard with a single auto-centering virtual
+   joystick, no laptop or bench rig. Speed + heading-nudge (spec under "Dashboard Field Joystick").
+3. **Waypoint missions** — drop numbered points on the dashboard canvas; the car executes them
+   sequentially using IMU yaw + wheel odometry. **Custom dead-reckoning nav — not Nav2**
+   (decided 2026-07-24; rationale below). No map or LIDAR required.
+4. **UWB pan tracking** — the Pi keeps the DW3000 anchor aimed at the tag, dead-reckoning the aim
+   through UWB dropouts. Pan *policy* on the Pi; smooth rate-limited actuation on the ESP32.
+5. **Field-ready operation** — the Pi brings the whole stack up on its own (no Mac in the loop);
+   the car is drivable and demoable standalone.
+
+**Dropped: Nav2 + action-server interfaces (2026-07-24).** Nav2 assumes a costmap/global-planner
+world and a `Twist` (`cmd_vel`) command surface; this is an Ackermann car whose command interface
+is a *heading setpoint* with the PIDs on the ESP32. Nav2 would be bolted-on and doesn't fit the
+command model, so `nav2_msgs/NavigateToPose` / `FollowWaypoints` and the `/follow_me` action are
+cut. Nav is **mode-based** instead: `mode_manager` selects a continuous controller per `nav_mode`.
+Waypoint missions are a custom dead-reckoning controller, not `FollowWaypoints`.
 
 ## Architecture
 
 ```
-┌──────────────────────────────────┐   USB serial   ┌──────────────────────────────────────┐
-│         ESP32-S3 (HAL)           │ ◄────────────► │         Raspberry Pi 4B              │
-│                                  │                │                                      │
-│  UWB AoA (DW3000: dist+bearing)  │  sensor JSON → │  ros2_control hardware interface     │
-│  IMU (BNO085)                    │  ← cmd JSON    │  fusion node (tag bearing filter)    │
-│  Speed fusion + cog detection    │                │                                      │
-│  RPM hall-effect sensor          │                │  dead reckoning pose estimator       │
-│  AS5600 encoder (cog detection)  │                │  follow-me setpoint generator        │
-│  ESC + steering servo PWM        │                │  nav action servers                  │
-│  Speed + heading PID loops       │                │  RViz/Foxglove visualization         │
-│  Serial framing + cmd-timeout    │                │                                      │
-│    failsafe                      │                │                                      │
-└──────────────────────────────────┘                └──────────────────────────────────────┘
+  ESP32-S3 (HAL)                    USB serial       Raspberry Pi 4B
+  ----------------------------    <----------->    --------------------------------
+  UWB AoA (DW3000: dist+brg)      sensor JSON ->    serial bridge (Python HAL)
+  IMU (BNO085)                    <- cmd JSON       tag EKF (uwb + pan + odom -> tag)
+  RPM hall + AS5600 encoder                         dead-reckoning pose estimator
+  Speed fusion + cog detection                      pan-aiming policy (-> target_pan)
+  ESC + steer + pan servo PWM                       mode controllers (per nav_mode):
+  Speed + heading PID loops                           follow / manual / waypoint / stopped
+  Serial framing + cmd failsafe                     web dashboard + Foxglove viz
 ```
 
 ESP32 repo: `follow-me-car-esp32`, branch `ros2-hal`.
@@ -111,6 +122,30 @@ Permanent placement regardless of migration:
   does no speed-sensor fusion and treats telemetry `speed`/`cogging` as authoritative.
 - **Heading + speed PIDs** → ESP32 for now; migration to the Pi (via raw-actuator mode) is
   optional, later, and only if it performs.
+- **UWB pan** (2026-07-24) — *split*: the aiming **policy** is on the Pi (`pan_controller`,
+  from the filtered tag estimate + odom, so it can dead-reckon the aim through UWB dropouts),
+  while **smooth rate-limited actuation** (`target_pan`, max slew) is on the ESP32. The Pi sends
+  a pan setpoint; the ESP32 slews to it. Runs independently of `nav_mode`.
+
+## Dashboard Field Joystick (manual mode)
+
+A single auto-centering virtual joystick for field driving (the `manual` `nav_mode`; the dashboard
+publishes `cmd_drive` directly, no Pi controller active). Control law:
+
+- **Reachable area:** press/drag anywhere except the rear half — **no commanded reverse** (matches
+  the `target_speed ≥ 0` wire clamp).
+- **Speed setpoint = radial distance from center**, proportional → `cmd_drive.speed`.
+- **Steering = the horizontal (x) offset drives a *continual adjustment* of the heading setpoint** —
+  a rate, not an absolute angle: holding the stick left winds `cmd_drive.heading` leftward at a rate
+  ∝ the x-offset, integrated over time. *(2026-07-24: confirm rate vs. absolute.)*
+- **Gate:** the integrated heading setpoint is clamped so it can't run too far ahead of the car's
+  current measured yaw — you can't wind the target arbitrarily far from reality. *(2026-07-24:
+  confirm the reference is measured yaw, and the bound.)*
+- **No turn-in-place, for free:** any x-offset also increases the radial distance, so a steering
+  input always commands nonzero speed. Consistent with Ackermann (can't turn without rolling) —
+  intentional, not a bug.
+- Mechanically this is a **heading-nudge + speed-magnitude** device, exactly what the heading-setpoint
+  wire contract wants; releasing to center → speed 0, heading holds.
 
 ## Hardware
 
@@ -131,17 +166,20 @@ Main components only — power distribution and wiring not tracked here.
 
 ## ROS2 Skills Showcased
 
-- `ros2_control` hardware interface (C++ plugin)
-- Custom ros2_control controller
-- Custom message and action types
-- Action servers (Nav2-compatible nav + follow-me)
-- Sensor fusion node (Kalman filter on absolute compass bearing)
-- Dead reckoning pose estimator (IMU + RPM → `nav_msgs/Odometry` + TF2)
-- TF2 transforms (`odom` → `base_link`)
-- RViz/Foxglove visualization
+- Custom message + service types (`follow_me_interfaces`)
+- Mode-managed control: a gated service (`set_nav_mode`) selects the active controller per latched
+  `nav_mode`; sibling controllers implement different policies
+- Sensor fusion node (EKF: UWB bearing + pan angle + odom → tag position in the `odom` frame)
+- Dead reckoning pose estimator (IMU yaw + wheel odometry → `nav_msgs/Odometry` + TF2)
+- TF2 transforms (`odom` → `base_link` → `uwb_link` → `tag_link`)
+- Live web dashboard over `foxglove_bridge` (telemetry, service calls, teleop publish)
 - Parameter YAML configuration
 - Launch files
 - rosbag2 logging
+
+(Dropped 2026-07-24: `ros2_control` hardware interface, custom `ros2_control` controller, and
+Nav2-compatible action servers — see Goals. The Python `serial_bridge` is the permanent HAL
+boundary; nav is mode-based, not action-based.)
 
 ## Implementation Phases
 
@@ -185,13 +223,13 @@ work progresses. ✅ marks what's built (the single source for phase status).
   is moot (camera removed 2026-07-13). Do not re-add either.
 - `FollowMe.action`
 
-### Phase 5 — Fusion node
-- DW3000 provides bearing directly — no trilateration needed. Fusion filters UWB bearing
-  on absolute compass bearing (port the Kalman scheme from the deleted `fusion.cpp`,
-  readable in esp32 repo history), and tracks uncertainty
-- Subscribes: `uwb/raw` (`UwbRaw`), `imu/data`
-- Publishes: its own tag estimate topic (message defined in this phase — the old
-  `FusedTagPose.msg` shape is the starting point)
+### Phase 5 — Fusion node ✅ (core, 2026-07-24)
+- Built: `tag_estimator` — an EKF whose state is the tag's `(x, y)` in `odom`, fusing
+  `uwb/raw` + pan angle + odom. The car's motion and the pan angle live in the measurement model.
+- Subscribes: `uwb/raw` (`UwbRaw`), `imu/data`, odom/pan. Publishes: `fused/tag_pose` (`TagEstimate`).
+- **Refinements still open** (see NOTES "Pi reimplementation checklist"): distance dead-reckoning
+  through UWB dropouts, the erratic-motion detector, and ~0.3 s anchor-lag compensation —
+  carried from the deleted `fusion.cpp`, not yet ported.
 
 ### Phase 6 — Dead reckoning pose estimator ✅
 - Integrates IMU yaw + wheel distance into 2D pose in `odom` frame
@@ -199,49 +237,68 @@ work progresses. ✅ marks what's built (the single source for phase status).
 - Subscribes: `/imu/data` (heading), `/wheel/state` (accumulated metres in `distance`)
 - `odom` starts at identity (initial yaw subtracted).
 
-### Phase 7 — ros2_control hardware interface
-- C++ `SystemInterface` plugin replaces Python bridge node
-- `read()`: parse serial frame → fill state interfaces
-- `write()`: serialize command interfaces → send to ESP32
-- Command interfaces mirror the wire contract: velocity (traction → `target_speed`) + a
-  custom heading-setpoint interface; switches to the standard Ackermann layout
-  (velocity + position) if/when the loops migrate via the raw-actuator mode
+### Phase 7 — ros2_control hardware interface ❌ DROPPED (2026-07-24)
+Cut deliberately. `ros2_control`'s payoff is highest when the control loop runs on the Pi; here the
+speed + heading PIDs live on the ESP32 and the Pi only shuttles setpoints, so a `SystemInterface`
+would be a thin wrapper whose `write()` just forwards a heading setpoint. It also doesn't fit the
+hardware: one serial bus carrying rich telemetry (IMU+cov, UWB, health, logs) that doesn't map to
+flat `(name, double)` state interfaces — so it wouldn't even fully replace `serial_bridge`. The
+Python bridge is the permanent HAL boundary. (If a "standard" is ever wanted, micro-ROS fits the
+MCU-over-serial reality far better — parked in NOTES.)
 
-### Phase 8 — Follow-me controller
-- Standalone node (or ros2_control controller): a *setpoint generator* — both PIDs stay on
-  the ESP32, so no Pi-side control loop is needed for this phase
-- Heading: absolute tag bearing from the Phase 5 estimate (or directly from `uwb/raw`
-  chained through TF: the tag's odom-frame position already composes yaw + pan + bearing)
-  → publish as the `cmd_drive` heading setpoint
-- Speed: distance-interpolated `target_speed` (port the min/max-speed-vs-distance logic
-  from the ESP32's `control.cpp` FOLLOW_ME case — deleted from the firmware 2026-07-14;
-  read it at esp32 repo commit `075ab58`, where it was last active)
+### Phase 8 — Follow-me controller ✅ (core, 2026-07-24)
+- Built: `nav_controller` — a *setpoint generator* (both PIDs stay on the ESP32). Commits the fused
+  tag as a point in `odom`, steers to it via `cmd_drive` heading, HOLDs on high bearing uncertainty.
+  Gated on `nav_mode` (`active_mode` param).
+- **Two policies planned** (2026-07-24): a **simple** "steer at the tag" cut (minimal, easy to
+  reason about) and the current/**complex** confidence-gated version, growing toward the ±60°-FOV
+  recovery behavior (NOTES "Follow-me as waypoint planning with recovery"). They become sibling
+  controllers with different `active_mode` values.
+- Speed: distance-interpolated `target_speed` (port the min/max-speed-vs-distance logic from the
+  ESP32's old `control.cpp` FOLLOW_ME case, readable at esp32 commit `075ab58`).
 
-### Phase 9 — Follow-me action server
-- `/follow_me` action: goal = start/stop, feedback = distance + angle + uncertainty, result = reason stopped
+### Phase 9 — Manual field teleop (dashboard joystick)
+- A `manual` `nav_mode` in which no Pi controller drives; the dashboard publishes `cmd_drive`
+  directly. Single auto-centering virtual joystick — control law under "Dashboard Field Joystick".
+  Supersedes the earlier `/follow_me` action idea (actions dropped 2026-07-24).
 
-### Phase 10 — Dead reckoning nav action servers
-- `/navigate_to_pose` (`nav2_msgs/NavigateToPose`): dead reckoning single goal
-- `/follow_waypoints` (`nav2_msgs/FollowWaypoints`): ordered waypoint missions
+### Phase 10 — Waypoint missions (custom dead-reckoning, NOT Nav2)
+- A `waypoint` `nav_mode` + controller. User drops numbered points on the dashboard canvas (in
+  `odom`); the controller drives them sequentially via `cmd_drive`, using the pose estimator for
+  progress. No costmap, no planner, no Nav2 — dead reckoning only.
+- Related future ideas (NOTES): record/replay a driven path as a mission; phone waypoint UI.
 
-### Phase 11 — Visualization + launch files
-- Foxglove/RViz config: heading arrow, path trace, sensor status markers
-- Single launch file starts everything
-- rosbag2 recording in launch file
-- **Visualization host:** ROS2/RViz on macOS is effectively unsupported — use Foxglove Studio
-  on the Mac connected to `foxglove_bridge` on the Pi (native Mac app, no Mac ROS2 install,
-  supports click-to-publish goal poses)
+### Phase 11 — UWB pan tracking
+- A standalone Pi node (`pan_controller`) — **not** tied to any `nav_mode` — that keeps the DW3000
+  anchor aimed at the tag. Subscribes `fused/tag_pose` (+odom), computes `target_pan`, dead-reckons
+  the aim through UWB dropouts. Smooth rate-limited actuation is already on the ESP32 (`target_pan`,
+  max slew). Open: separate pan-setpoint topic vs. field on `DriveCommand` (lean: separate topic —
+  pan is independent of the drive command).
+
+### Phase 12 — Field-ready bringup + visualization
+- **Laptop-free bringup:** the Pi starts the whole stack on boot (systemd unit or equivalent); car
+  drivable/demoable with no Mac attached.
+- Single launch file starts everything; rosbag2 recording in the launch file.
+- **Visualization host:** ROS2/RViz on macOS is effectively unsupported — use Foxglove Studio on the
+  Mac against `foxglove_bridge` on the Pi (native Mac app, no Mac ROS2 install), plus the project's
+  own web dashboard.
 
 ## Repository Reference
 
 ### Package structure
 ```
 src/
-├── follow_me_interfaces/     — custom message + action definitions
-├── follow_me_hardware/       — ros2_control hardware interface (C++ plugin)
-├── follow_me_nodes/          — Python nodes: fusion, dead reckoning, nav, visualization
-└── follow_me_bringup/        — launch files + YAML parameter configs
+├── follow_me_interfaces/     — custom message + service definitions (msg/, srv/)
+└── follow_me_nodes/          — Python nodes + launch/ (serial_bridge, tag_estimator,
+                                pose_estimator, tag_broadcaster, mode_manager,
+                                nav_controller, pi_health)
 ```
+
+Two packages, deliberately (2026-07-24). `follow_me_interfaces` is separate because message/service
+generation must build first and be depended on without dragging in node code — the one split ROS2
+forces. `follow_me_hardware` is gone with Phase 7 (no C++ plugin). A separate `follow_me_bringup`
+isn't worth the package boilerplate for a solo project — launch files live in
+`follow_me_nodes/launch/` until config churn justifies splitting.
 
 ### Build & run
 See [cheat.md](./cheat.md) for the commands that actually work today.
@@ -251,9 +308,8 @@ colcon build --symlink-install
 source install/setup.bash
 ros2 run follow_me_nodes serial_bridge
 
-# FUTURE — follow_me_bringup does not exist yet. Build it when there are multiple nodes
-# to start together (Phase 6 estimator + Foxglove), not before.
-# ros2 launch follow_me_bringup follow_me.launch.py
+# Whole stack (launch lives in follow_me_nodes, not a separate bringup package):
+ros2 launch follow_me_nodes bringup.launch.py
 ```
 
 ### Key topics
@@ -261,7 +317,7 @@ ros2 run follow_me_nodes serial_bridge
 |-------|------|-----------|
 | `/uwb/raw` | `follow_me_interfaces/UwbRaw` | ESP32 → ROS2 (tag range/bearing; Phase 5 fusion input) |
 | `/imu/data` | `sensor_msgs/Imu` | ESP32 → ROS2 |
-| `/tag/pose` | *(Phase 5 — message defined then)* | fusion node output (filtered bearing/dist to tag) |
+| `/fused/tag_pose` | `follow_me_interfaces/TagEstimate` | `tag_estimator` output — EKF tag position in `odom` |
 | `/odom` | `nav_msgs/Odometry` | dead reckoning node output |
 | `/wheel/state` | `follow_me_interfaces/WheelState` | fused speed + odometer + cogging flag, one stamped message |
 | `/command/status` | `follow_me_interfaces/CommandStatus` | ESP32 control mode (`command_mode`) + accepted-command echo |
@@ -269,6 +325,8 @@ ros2 run follow_me_nodes serial_bridge
 | `/cmd_drive` | `follow_me_interfaces/DriveCommand` | controller/nav → bridge (later: hardware interface) |
 | `/nav_mode` | `follow_me_interfaces/NavMode` | mode_manager → all (latched/transient_local): active Pi-side nav policy |
 | `/sensor_health` | `follow_me_interfaces/SensorHealth` | ESP32 → ROS2 (~1-2 Hz): per-sensor update rates from `{"type":"health"}` frames, plus link-health/throughput stats (telem rate, seq gaps, TX drops, inter-frame jitter) |
+| `/pi_health` | `follow_me_interfaces/PiHealth` | `pi_health` (~1 Hz): Pi host CPU load/util, bridge-process CPU, memory, temp — "is the Pi the bottleneck?" |
+| `/cmd_pan` *(planned)* | scalar pan setpoint (deg) | `pan_controller` → bridge; merged into every TX frame as `target_pan`. Topic vs. `DriveCommand` field TBD |
 
 Field-level schema for the ESP32-sourced topics — units, types, sentinels, wire conversions —
 is in **`interface.md`** (the SOT); this table is a topic directory, not the field spec.
@@ -304,8 +362,9 @@ earlier `/cmd_vel` (Twist) and `/cmd_ackermann` plans are superseded; if the loo
 migrate via the raw-actuator mode, Ackermann becomes the natural fit again.
 
 ### Actions
-| Action | Type | Description |
-|--------|------|-------------|
-| `/follow_me` | `follow_me_interfaces/FollowMe` | Start/stop autonomous following |
-| `/navigate_to_pose` | `nav2_msgs/NavigateToPose` | Dead reckoning single goal |
-| `/follow_waypoints` | `nav2_msgs/FollowWaypoints` | Dead reckoning waypoint mission |
+
+**None (2026-07-24).** Action servers and Nav2 interfaces were dropped — see Goals. Navigation is
+mode-based: `mode_manager` selects a continuous controller per `nav_mode` (`follow` simple/complex,
+`manual`, `waypoint`, `stopped`), each publishing `cmd_drive`. Start/stop is a `set_nav_mode` service
+call, not an action goal. Waypoint missions are a custom dead-reckoning controller, not
+`nav2_msgs/FollowWaypoints`.

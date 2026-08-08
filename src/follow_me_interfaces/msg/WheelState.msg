@@ -4,6 +4,7 @@
 std_msgs/Header header
 float32 speed        # m/s, ESP32 fused speed estimate (throttle PID feedback); SIGNED, < 0 =
                      #   reverse/rollback. Fails HIGH on sensor flicker, never spuriously low.
+float32 speed_variance  # (m/s)^2, variance of the fused speed estimate (KF P[0][0]); higher = less certain
 float32 distance     # m, odometer; SIGNED (reverse subtracts). Stitched continuous across ESP32
                      #   reboots at the bridge, so it does NOT reset on reboot (interface.md).
 bool    cogging      # ESP32 latching cogging flag (ESC deadband/stiction, inferred onboard)

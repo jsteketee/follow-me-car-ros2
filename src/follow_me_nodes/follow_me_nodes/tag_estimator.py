@@ -223,10 +223,11 @@ class TagEstimator(Node):
         if self._car is None or self._pan is None:
             return  # can't form the measurement model yet
 
-        # Dedup by measurement time (stamp - age): the bridge re-reports each ~10 Hz fix
-        # on every ~50 Hz telemetry frame with growing age_ms.
+        # The bridge now stamps uwb/raw at the fix capture time (uwb.t) and gates on it, so the
+        # header stamp IS the measurement time — no age subtraction. The dedup guard below stays
+        # as a backstop (a resent fix would carry the same stamp).
         stamp_ns = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
-        fix_ns = stamp_ns - msg.age_ms * 1_000_000
+        fix_ns = stamp_ns
         if self._last_fix_ns is not None and fix_ns <= self._last_fix_ns:
             return
         self._last_fix_ns = fix_ns

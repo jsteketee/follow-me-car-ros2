@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # performance-benchmark — sample the health topics for a fixed window and report on them.
-# Records 30 s of the *_health topics into a dated bag under bags/performance-benchmark/,
+# Records 10 s of the *_health topics into a dated bag under bags/performance-benchmark/,
 # then prints and writes a CSV of each recorded field's average and max over the run.
 #
 # Usage:  performance-benchmark.sh [existing-bag]
-#   (no args)      record a new 30 s bag, then report on it
+#   (no args)      record a new 10 s bag, then report on it
 #   existing-bag   skip recording; only (re)build the report for that bag
 #
 # The report is written next to the bag as <bag-name>-report.csv.
-# Env overrides: DURATION_S (window, default 30), HEALTH_TOPIC_REGEX (default '.*_health$').
+# Env overrides: DURATION_S (window, default 10), HEALTH_TOPIC_REGEX (default '.*_health$').
 
 set -euo pipefail
 
-DURATION_S="${DURATION_S:-30}"                    # record window in seconds
+DURATION_S="${DURATION_S:-10}"                    # record window in seconds
 TOPIC_REGEX="${HEALTH_TOPIC_REGEX:-.*_health$}"   # namespace-safe: matches pi_health, sensor_health
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BAG_ROOT="$SCRIPT_DIR/bags/performance-benchmark"
@@ -33,7 +33,7 @@ print_banner() {
 ================================================================================
  performance-benchmark — follow-me health-topic benchmark
 --------------------------------------------------------------------------------
- Records a fixed 30 s sample of the health topics (pi_health + sensor_health)
+ Records a fixed 10 s sample of the health topics (pi_health + sensor_health)
  into a dated rosbag under bags/performance-benchmark/, then reports the average
  and max of every recorded field over the run and saves it as a CSV beside the
  bag. Pass an existing bag path to skip recording and just rebuild its report.
@@ -206,17 +206,31 @@ bag="$BAG_ROOT/performance-benchmark_$(date +%Y%m%d_%H%M%S)"
 echo "Mode: record ${DURATION_S}s of topics matching /${TOPIC_REGEX}/"
 echo "Bag:  $bag"
 echo "Recording... (finalizes automatically after ${DURATION_S}s; Ctrl-C stops early)"
-echo
+
+# Background elapsed/remaining counter while record runs foreground and logs to a file.
+rec_log="$(mktemp -t perfbench-record.XXXXXX)"
+(
+  for ((i = 1; i <= DURATION_S; i++)); do
+    printf '\r  recording %2ds / %2ds  (%2ds left) ' "$i" "$DURATION_S" "$((DURATION_S - i))"
+    sleep 1
+  done
+) &
+counter_pid=$!
 
 # timeout -s INT delivers a clean SIGINT so rosbag2 finalizes the mcap; 124 = timer fired.
-timeout -s INT "$DURATION_S" ros2 bag record -s mcap -o "$bag" -e "$TOPIC_REGEX" || true
+timeout -s INT "$DURATION_S" ros2 bag record -s mcap -o "$bag" -e "$TOPIC_REGEX" >"$rec_log" 2>&1 || true
+
+kill "$counter_pid" 2>/dev/null || true
+wait "$counter_pid" 2>/dev/null || true
+printf '\r%*s\r' 44 ''   # wipe the counter line
 
 if [ ! -f "$bag/metadata.yaml" ]; then
   echo "Error: recording produced no bag at $bag (no topics matched, or record failed)." >&2
+  echo "  see record log: $rec_log" >&2
   exit 1
 fi
+rm -f "$rec_log"
 
-echo
 echo "Recording complete."
 echo
 generate_report "$bag"

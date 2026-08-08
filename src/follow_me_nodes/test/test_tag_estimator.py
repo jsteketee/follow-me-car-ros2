@@ -165,7 +165,7 @@ def test_absolute_vs_relative_consistency(node):
 
 
 def test_dedup_same_fix(node):
-    """(5) The bridge's 50 Hz re-reports of one fix (same stamp - age) fuse exactly once."""
+    """(5) A re-reported fix (same capture stamp) fuses exactly once."""
     n, _ = node
     prime(n)
     t = now_ns(n)
@@ -173,9 +173,10 @@ def test_dedup_same_fix(node):
     p_after_first = (n._pxx, n._pxy, n._pyy)
     tag_after_first = n._tag
 
-    # Same fix re-reported on later telemetry frames: stamp and age grow in lockstep.
-    n._on_uwb_raw(make_fix(2.0, 0.0, 20, t + 20_000_000))
-    n._on_uwb_raw(make_fix(2.0, 0.0, 40, t + 40_000_000))
+    # Same fix re-reported on later telemetry frames: the bridge stamps at capture time, so the
+    # stamp does NOT advance — only age_ms grows as the frame ts moves on.
+    n._on_uwb_raw(make_fix(2.0, 0.0, 20, t))
+    n._on_uwb_raw(make_fix(2.0, 0.0, 40, t))
 
     assert (n._pxx, n._pxy, n._pyy) == p_after_first   # covariance did not collapse
     assert n._tag == tag_after_first
@@ -221,8 +222,9 @@ def test_pairs_fix_with_measurement_time_yaw(node):
     t_proc = t_meas + 100_000_000                                    # 100 ms later
     n._on_odom(make_odom(0.0, 0.0, math.pi / 2.0, stamp_ns=t_proc))  # car has spun to +90 deg
 
-    # Fix stamped now (t_proc) but measured 100 ms ago -> fix_ns == t_meas (yaw 0).
-    n._on_uwb_raw(make_fix(2.0, 0.0, 100, t_proc))
+    # The bridge stamps the fix at its capture time (uwb.t), so the stamp IS t_meas even though
+    # the telemetry frame carrying it was emitted at t_proc; age_ms is informational only.
+    n._on_uwb_raw(make_fix(2.0, 0.0, 100, t_meas))
 
     tx, ty = n._tag
     assert tx == pytest.approx(2.0, abs=1e-6)   # paired with yaw 0 -> tag at +x

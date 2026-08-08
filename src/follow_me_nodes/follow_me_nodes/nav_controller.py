@@ -34,9 +34,7 @@ LATCHED_QOS = QoSProfile(
 # --- Follow tuning (all exposed as ROS params; these are the defaults) ---
 MPH_TO_MPS = 0.44704       # exact by definition; the stack is SI downstream of the bridge
 FOLLOW_DISTANCE_M = 2.0    # hunt the tag when it is beyond this range; hold position inside it
-# On/off follow speed. 3.0 mph is ABOVE the ESP32's default 2.5 mph cap — raise maxSpeedMph on
-# the dashboard or the firmware rejects the frames (cmd_rejects climbs, car won't move).
-CRUISE_SPEED_MPS = 3.0 * MPH_TO_MPS   # 1.34 m/s = 3.0 mph
+CRUISE_SPEED_MPS = 3.0 * MPH_TO_MPS
 # Trust gate on the fused bearing 1-sigma: enter HOLD above _HIGH, re-acquire below _LOW
 # (hysteresis). In degrees to match the estimator's logs; measured normal is 5-10 deg, >10 bad.
 BEARING_SIGMA_HIGH_DEG = 10.0

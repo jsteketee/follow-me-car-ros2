@@ -66,6 +66,9 @@ export function RosoutOverlay() {
             {sev}
           </button>
         ))}
+        <button className="rosout-level clear" onClick={() => { bufRef.current = []; bump((n) => n + 1); }}>
+          clear
+        </button>
       </div>
     </div>
   );

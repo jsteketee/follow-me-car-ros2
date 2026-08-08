@@ -15,7 +15,7 @@ export type LiveStatus = {
   tagRangeSigma: number; tagBearingSigma: number; tagCoasting: boolean; tagAgeMs: number;
   health: { name: string; hz: number }[]; healthWall: number; maxLoopUs: number; telemFrames1s: number;
   txDrops: number; seqGaps: number; parseFails: number; maxFrameGapMs: number;
-  piLoad1m: number; piNcpu: number; piCpu: number; piBridgeCpu: number;
+  piLoadPercent: number; piCpu: number; piBridgeCpu: number;
   piMemUsedMb: number; piMemTotalMb: number; piTempC: number; piWall: number;
   hasStatus: boolean; hasCmd: boolean; hasNavMode: boolean; hasTagEst: boolean; hasHealth: boolean; hasPi: boolean;
 };
@@ -37,7 +37,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
     tagRangeSigma: 0, tagBearingSigma: 0, tagCoasting: false, tagAgeMs: -1,
     health: [], healthWall: 0, maxLoopUs: 0, telemFrames1s: 0,
     txDrops: 0, seqGaps: 0, parseFails: 0, maxFrameGapMs: 0,
-    piLoad1m: 0, piNcpu: 0, piCpu: 0, piBridgeCpu: -1,
+    piLoadPercent: 0, piCpu: 0, piBridgeCpu: -1,
     piMemUsedMb: 0, piMemTotalMb: 0, piTempC: NaN, piWall: 0,
     hasStatus: false, hasCmd: false, hasNavMode: false, hasTagEst: false, hasHealth: false, hasPi: false,
   });
@@ -84,7 +84,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
   });
   useRosTopic(ns("pi_health"), (m: PiHealthMsg) => {
     const s = statusRef.current;
-    s.piLoad1m = m.load_1m; s.piNcpu = m.ncpu; s.piCpu = m.cpu_percent;
+    s.piLoadPercent = m.load_percent; s.piCpu = m.cpu_percent;
     s.piBridgeCpu = m.bridge_cpu_percent; s.piMemUsedMb = m.mem_used_mb;
     s.piMemTotalMb = m.mem_total_mb; s.piTempC = m.temp_c;
     s.piWall = performance.now() / 1000; s.hasPi = true;
